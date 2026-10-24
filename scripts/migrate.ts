@@ -2,12 +2,9 @@
  * Applies db/migrations/*.sql in order, once each, tracked in `_migrations`.
  * Usage: DATABASE_URL=... npm run db:migrate
  */
-import { Pool, neonConfig } from '@neondatabase/serverless';
+import { Pool } from '@neondatabase/serverless';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import ws from 'ws';
-
-neonConfig.webSocketConstructor = ws as unknown as typeof WebSocket;
 
 async function main() {
   const url = process.env.DATABASE_URL;
