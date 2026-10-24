@@ -22,7 +22,9 @@ npm run dev
 
 **Neon:** a project named `mewwo` has already been created and migrated (project id `green-bird-74538657`, region `aws-ap-southeast-1`). Copy its pooled connection string from the Neon console into `DATABASE_URL`. `db:migrate` will report every migration as already applied.
 
-**Deploy (Vercel):** import the repo, set `DATABASE_URL`, `AUTH_SECRET` (`openssl rand -base64 48`) and `NEXT_PUBLIC_SITE_URL`, deploy. No secrets are ever sent to the browser; all game mutations go through server routes.
+**Deploy (Vercel):** functions are pinned to `sin1` (Singapore, `vercel.json`) to sit next to the Neon database in `aws-ap-southeast-1`; each game request makes about 15 queries, so distance to the database matters. If you move the database, move the region with it.
+
+**Deploy steps:** import the repo, set `DATABASE_URL`, `AUTH_SECRET` (`openssl rand -base64 48`) and `NEXT_PUBLIC_SITE_URL`, deploy. No secrets are ever sent to the browser; all game mutations go through server routes.
 
 ## How it works
 
