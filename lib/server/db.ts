@@ -1,14 +1,15 @@
-import { Pool, neonConfig } from '@neondatabase/serverless';
+import { Pool } from '@neondatabase/serverless';
 import { drizzle } from 'drizzle-orm/neon-serverless';
-import ws from 'ws';
 import * as schema from '../../db/schema';
 import { env } from './env';
 
-// Node < 22 has no global WebSocket; `ws` makes transactions work everywhere.
-neonConfig.webSocketConstructor = ws as unknown as typeof WebSocket;
+// Transactions use a WebSocket. Node 22+ (Vercel runs 24) has one built in, so we deliberately do NOT
+// import the `ws` package: bundlers mangle it and the process crashes with "b.mask is not a function".
 
 function make() {
   const pool = new Pool({ connectionString: env('DATABASE_URL'), max: 5 });
+  // Neon closes idle connections. Without a listener, that surprise error would take the whole process down.
+  pool.on('error', (e: Error) => console.error('[mewwo] idle db connection dropped:', e.message));
   return drizzle(pool, { schema });
 }
 
