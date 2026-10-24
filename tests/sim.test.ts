@@ -265,3 +265,95 @@ test('pose: blending converges and stays continuous', () => {
   }
   assert.ok(Math.abs(p.curl - 1) < 0.01);
 });
+
+// ---------- 2.0: motion maths ----------
+import { makeProfile, distanceAt, speedAt, makeTrack, sampleTrack, curvePath, turnToward, angleDiff } from '../lib/world/kinematics.ts';
+import { useSpot } from '../lib/world/place.ts';
+import { lineClear, isFreePoint } from '../lib/world/nav.ts';
+
+test('velocity profile eases in and out and covers exactly the path length', () => {
+  const p = makeProfile(4, 1.2);
+  assert.equal(distanceAt(p, 0), 0);
+  assert.ok(Math.abs(distanceAt(p, p.duration) - 4) < 1e-9);
+  assert.equal(speedAt(p, 0), 0);
+  assert.ok(speedAt(p, 0.05) < 0.3, 'starts gently');
+  assert.ok(speedAt(p, p.duration - 0.05) < 0.3, 'stops gently');
+  let last = -1;
+  for (let t = 0; t <= p.duration; t += p.duration / 200) {
+    const d = distanceAt(p, t);
+    assert.ok(d >= last - 1e-9, 'never moves backwards');
+    assert.ok(speedAt(p, t) <= p.vmax + 1e-9);
+    last = d;
+  }
+});
+
+test('short hops never exceed what fits and still arrive', () => {
+  const p = makeProfile(0.3, 2.6);
+  assert.ok(p.vmax < 2.6);
+  assert.ok(Math.abs(distanceAt(p, p.duration) - 0.3) < 1e-9);
+});
+
+test('track sampling follows the polyline and reports heading', () => {
+  const tr = makeTrack([{ x: 0, z: 0 }, { x: 0, z: 2 }, { x: 2, z: 2 }]);
+  assert.equal(tr.length, 4);
+  const a = sampleTrack(tr, 1);
+  assert.deepEqual([a.x, a.z], [0, 1]);
+  assert.ok(Math.abs(a.heading) < 1e-9);
+  const b = sampleTrack(tr, 3);
+  assert.deepEqual([b.x, b.z], [1, 2]);
+  assert.ok(Math.abs(b.heading - Math.PI / 2) < 1e-9);
+  assert.deepEqual([sampleTrack(tr, 99).x, sampleTrack(tr, 99).z], [2, 2]);
+});
+
+test('rounded paths keep their endpoints, stay in free space, and cut the corners', () => {
+  const g = buildGrid('home', world());
+  const from = { x: -3, z: -3 }, to = { x: 3, z: 1 };
+  const raw = findPath(g, from, to)!;
+  const curved = curvePath(raw, (a, b) => lineClear(g, a, b));
+  assert.deepEqual(curved[0], raw[0]);
+  assert.deepEqual(curved[curved.length - 1], raw[raw.length - 1]);
+  for (let i = 1; i < curved.length; i++) assert.ok(lineClear(g, curved[i - 1]!, curved[i]!));
+  if (raw.length > 2) assert.ok(curved.length > raw.length, 'a bent path gets rounded');
+});
+
+test('rounding falls back to the original path rather than clip furniture', () => {
+  const raw = [{ x: 0, z: 0 }, { x: 1, z: 0 }, { x: 1, z: 1 }];
+  const curved = curvePath(raw, () => false);
+  assert.deepEqual(curved, raw);
+});
+
+test('turning is rate-limited and never overshoots', () => {
+  let h = 0;
+  const target = Math.PI * 0.9;
+  for (let i = 0; i < 400; i++) {
+    const before = Math.abs(angleDiff(h, target));
+    h = turnToward(h, target, 1 / 60, 10, 4);
+    assert.ok(Math.abs(angleDiff(h, target)) <= before + 1e-9);
+    assert.ok(Math.abs(angleDiff(h, target)) >= 0 );
+  }
+  assert.ok(Math.abs(angleDiff(h, target)) < 0.01);
+  // goes the short way round the circle
+  assert.ok(turnToward(3.0, -3.0, 0.1, 10, 4) > 3.0);
+});
+
+test('the cat stops beside a bowl, facing it, instead of standing in it', () => {
+  const objs = world();
+  const bowl = objs.find((o) => o.type === 'food_bowl');
+  assert.ok(bowl, 'seed has a food bowl');
+  const g = buildGrid('home', objs);
+  const from = { x: bowl!.x + 2, z: bowl!.z + 1 };
+  const spot = useSpot(g, bowl!, 'eat', from);
+  const d = Math.hypot(spot.x - bowl!.x, spot.z - bowl!.z);
+  assert.ok(d > 0.25 && d < 0.5, `stands ${d.toFixed(2)}m from the bowl`);
+  assert.ok(isFreePoint(g, spot));
+  const faces = Math.atan2(bowl!.x - spot.x, bowl!.z - spot.z);
+  assert.ok(Math.abs(angleDiff(spot.heading!, faces)) < 1e-9);
+  // deterministic: same inputs, same spot
+  assert.deepEqual(useSpot(g, bowl!, 'eat', from), spot);
+  // sleeping on a bed is unchanged: no offset
+  const bed = objs.find((o) => o.type === 'cat_bed');
+  if (bed) {
+    const s = useSpot(g, bed, 'sleep', from);
+    assert.equal(s.heading, undefined);
+  }
+});

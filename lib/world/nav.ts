@@ -99,7 +99,7 @@ export function nearestFreeCell(g: Grid, p: Pt): { c: number; r: number } | null
   return null;
 }
 
-function lineClear(g: Grid, a: Pt, b: Pt): boolean {
+export function lineClear(g: Grid, a: Pt, b: Pt): boolean {
   const dist = Math.hypot(b.x - a.x, b.z - a.z);
   const steps = Math.max(1, Math.ceil(dist / (CELL / 3)));
   for (let i = 0; i <= steps; i++) {
@@ -295,4 +295,10 @@ export function validatePlacement(
 
 function shrink(r: Rect, by: number): Rect {
   return { minX: r.minX + by, maxX: r.maxX - by, minZ: r.minZ + by, maxZ: r.maxZ - by };
+}
+
+/** Is the cell under this point walkable? */
+export function isFreePoint(g: Grid, p: Pt): boolean {
+  const c = toCell(g, p);
+  return free(g, c.c, c.r);
 }
