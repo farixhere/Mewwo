@@ -2,6 +2,8 @@
 
 Mewwo is a shared 3D virtual world where two people raise one little cat together. Feed, play, explore, and watch your kitten grow into an adult cat. With realistic cat behaviour, a living home, changing days and nights, and shared memories, Mewwo makes your little companion feel alive, even when you're apart. Two hearts, one little life.
 
+> **2.0 (branch `mewwo-2.0`):** new cat gait and navigation, day/night atmosphere, pastel room and HUD, quality tiers. Compiles on Vercel; visuals not yet reviewed in a browser. Preview deployments need `DATABASE_URL`, `AUTH_SECRET`, `NEXT_PUBLIC_SITE_URL` enabled for the Preview scope.
+
 > **Status: first complete draft.** The code was written without access to the npm registry, so it has **never been compiled or run in a browser**. The simulation core (needs, brain, offline progression, growth, navigation, placement rules, body-language model) is covered by 20 passing tests; everything else (Next.js pages, React Three Fiber scene, API routes) is type-checked only against stand-ins. Expect a handful of small fixes on the first real build, and expect to tune the look of the cat and room once you see them. See [Known limitations](#known-limitations).
 
 ## Stack
