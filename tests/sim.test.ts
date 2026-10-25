@@ -357,3 +357,71 @@ test('the cat stops beside a bowl, facing it, instead of standing in it', () => 
     assert.equal(s.heading, undefined);
   }
 });
+
+// ---------- 2.0: atmosphere, quality, layout ----------
+import { atmosphereAt, keyLightPosition, hourDiff, wrapHour } from '../lib/world/atmosphere.ts';
+import { pickQuality } from '../lib/client/quality.ts';
+import { uiInsets, freeRect, fitZoom, centreShift } from '../lib/client/layout.ts';
+
+test('atmosphere is continuous across the day, including the midnight wrap', () => {
+  let prev = atmosphereAt(0);
+  for (let h = 0.05; h <= 24.0001; h += 0.05) {
+    const a = atmosphereAt(h);
+    assert.ok(Math.abs(a.sunIntensity - prev.sunIntensity) < 0.2, `sun jumps at ${h.toFixed(2)}`);
+    assert.ok(Math.abs(a.exposure - prev.exposure) < 0.05);
+    for (let i = 0; i < 3; i++) assert.ok(Math.abs(a.skyTop[i]! - prev.skyTop[i]!) < 0.08, `sky jumps at ${h.toFixed(2)}`);
+    prev = a;
+  }
+  const m0 = atmosphereAt(0), m24 = atmosphereAt(24);
+  assert.deepEqual(m0.skyTop, m24.skyTop);
+  assert.deepEqual(atmosphereAt(-1).skyTop, atmosphereAt(23).skyTop);
+});
+
+test('noon is bright with lamps off, midnight is dim with lamps on', () => {
+  const noon = atmosphereAt(12.5), night = atmosphereAt(0);
+  assert.ok(noon.sunIntensity > night.sunIntensity * 4);
+  assert.equal(noon.lamp, 0);
+  assert.equal(night.lamp, 1);
+  for (const c of [...night.skyTop, ...night.skyHorizon]) assert.ok(c > 0.1, 'never black');
+});
+
+test('the key light travels across the sky and hands over to the moon at night', () => {
+  const morning = keyLightPosition(8), evening = keyLightPosition(16);
+  assert.ok(morning[0] < evening[0]);
+  const night = keyLightPosition(1);
+  assert.deepEqual(night, keyLightPosition(23));
+  assert.ok(night[1] > 0);
+});
+
+test('hour helpers take the short way round', () => {
+  assert.equal(wrapHour(25), 1);
+  assert.equal(hourDiff(23, 1), 2);
+  assert.equal(hourDiff(1, 23), -2);
+});
+
+test('quality starts sensibly from device hints', () => {
+  assert.equal(pickQuality({ saveData: true, cores: 16, memoryGb: 16 }), 'low');
+  assert.equal(pickQuality({ cores: 2 }), 'low');
+  assert.equal(pickQuality({ cores: 8, memoryGb: 8 }), 'high');
+  assert.equal(pickQuality({ cores: 8, memoryGb: 4, mobile: true }), 'medium');
+  assert.equal(pickQuality({ cores: 8, memoryGb: 8, mobile: true }), 'high');
+  assert.equal(pickQuality({}), 'medium');
+});
+
+test('framing leaves room for the HUD on phones and desktops', () => {
+  const phone = uiInsets({ width: 390, height: 844, sheet: false, moving: false });
+  const open = uiInsets({ width: 390, height: 844, sheet: true, moving: false });
+  assert.ok(open.bottom > phone.bottom);
+  assert.ok(phone.top > 0 && phone.left > 0);
+  const free = freeRect(390, 844, phone);
+  assert.ok(free.w > 250 && free.h > 400);
+  // the picture is pushed down and right of centre by the top/left chrome, then up by the bottom chrome
+  const s = centreShift(phone);
+  assert.ok(s.x > 0);
+  const desk = uiInsets({ width: 1440, height: 900, sheet: true, moving: false });
+  assert.ok(desk.right > 400);
+  const z = fitZoom(10, 8, freeRect(1440, 900, desk));
+  assert.ok(z >= 22 && z <= 110);
+  // a narrow free area gives a smaller zoom than a wide one
+  assert.ok(fitZoom(10, 8, { w: 300, h: 600 }) < fitZoom(10, 8, { w: 900, h: 600 }));
+});
