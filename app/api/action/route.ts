@@ -9,5 +9,5 @@ export async function POST(req: Request) {
     const uid = await currentUserId();
     if (!uid) return json({ error: 'Please sign in.' }, 401);
     return json(await performAction(uid, actionInput.parse(await req.json())));
-  });
+  }, 'action');
 }

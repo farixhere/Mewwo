@@ -116,6 +116,8 @@ export const useGame = create<Store>((set, get) => ({
 
   setView(v) {
     const prev = get();
+    // A slow, older reply must never roll the screen back past newer state.
+    if (prev.view && v.rev < prev.view.rev) return;
     const catLoc = v.cat.location;
     const patch: Partial<Store> = { view: v, clockOffset: v.now - Date.now() };
     if (prev.lastCatLocation !== catLoc) {
@@ -135,6 +137,7 @@ export const useGame = create<Store>((set, get) => ({
       }
     }
     set(patch as Store);
+    transport?.adopt(v.rev);
     transport?.refreshAt(v.cat.activityUntil - (v.now - Date.now()) + 300);
   },
 
@@ -154,7 +157,7 @@ export const useGame = create<Store>((set, get) => ({
   async act(action, optimistic) {
     const before = get().view;
     if (optimistic && before) set({ view: optimistic(before) });
-    set({ busy: true });
+    // Buttons stay live while a request is in flight: the server serialises taps, and the screen never freezes.
     try {
       const res = await fetch('/api/action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(action) });
       const data = await res.json().catch(() => ({}));
@@ -171,8 +174,6 @@ export const useGame = create<Store>((set, get) => ({
       get().toast('Connection hiccup. Trying again shortly.', 'warn');
       await transport?.refresh();
       return false;
-    } finally {
-      set({ busy: false });
     }
   },
 
