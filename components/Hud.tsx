@@ -1,9 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useGame } from '@/lib/client/store';
 import { audio } from '@/lib/client/audio';
 import { liveHour } from '@/lib/client/clock';
-import { OBJECT_DEFS } from '@/lib/world/catalog';
+import { LOCATIONS, OBJECT_DEFS } from '@/lib/world/catalog';
 import { CatFace } from './CatFace';
 import { Minimap } from './Minimap';
 import { Sheets } from './Sheets';
@@ -64,6 +64,8 @@ export function Hud() {
   const sound = useGame((s) => s.sound);
   const move = useGame((s) => s.move);
   const clockOffset = useGame((s) => s.clockOffset);
+  const caption = useGame((s) => s.caption);
+  const lastCall = useRef(0);
   const [, tick] = useState(0);
   useEffect(() => { const i = setInterval(() => tick((n) => n + 1), 15_000); return () => clearInterval(i); }, []);
   useEffect(() => { audio.configure(sound, view.household.daylight); }, [sound, view.household.daylight]);
@@ -80,6 +82,15 @@ export function Hud() {
   const favToy = toys.slice().sort((a, b) => (c.favourites[`toy:${b.id}`] ?? 0) - (c.favourites[`toy:${a.id}`] ?? 0))[0];
 
   const unlock = () => audio.unlock();
+  // Call her from the front of the room. (Tapping the floor calls her to that spot instead.)
+  const call = () => {
+    unlock();
+    const now = Date.now();
+    if (now - lastCall.current < 2500) return;
+    lastCall.current = now;
+    const b = LOCATIONS[c.location]!.bounds;
+    void act({ type: 'call', x: (b.minX + b.maxX) / 2, z: b.maxZ - 1 });
+  };
   const pet = () => { unlock(); void act({ type: 'pet' }); };
   const play = () => {
     unlock();
@@ -146,6 +157,7 @@ export function Hud() {
               </div>
             </button>
             <ActivityCard />
+            {caption && <div className="caption" key={caption.id} role="status" aria-label="Cat sound">{caption.text}</div>}
           </div>
           <div className="pill time-pill">
             <span aria-hidden>{phaseIcon}</span>
@@ -167,6 +179,7 @@ export function Hud() {
           <div className="bottom">
             <div className="bottom-main">
               <div className="actions" role="group" aria-label="Care actions">
+                <button className="act call" disabled={busy} onClick={call}><span aria-hidden>📣</span>Call</button>
                 <button className="act pet" disabled={busy} onClick={pet}><span aria-hidden>🤚</span>Pet</button>
                 <button className="act play" disabled={busy} onClick={play}><span aria-hidden>🧶</span>Play</button>
                 <button className="act feed" disabled={busy} onClick={feed}><span aria-hidden>🍽️</span>Feed</button>

@@ -66,7 +66,7 @@ h1, h2, h3 { margin: 0; line-height: 1.15; }
 .act span { font-size: 20px; line-height: 1; }
 .act:active:not(:disabled) { transform: scale(.95); }
 .act:disabled { opacity: .6; }
-.act.pet { background: var(--peach); } .act.play { background: #FFE9A8; } .act.feed { background: var(--sage); } .act.water { background: var(--sky); }
+.act.call { background: #E4DAF5; } .act.pet { background: var(--peach); } .act.play { background: #FFE9A8; } .act.feed { background: var(--sage); } .act.water { background: var(--sky); }
 .dock { display: flex; justify-content: center; gap: 6px; padding: 5px; background: color-mix(in srgb, var(--panel) 94%, transparent); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); pointer-events: auto; }
 .dock button { min-width: 64px; min-height: 46px; border-radius: 16px; border: 0; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; font-weight: 800; padding: 4px 8px; }
 .dock button span.ic { font-size: 18px; line-height: 1; }
@@ -149,3 +149,10 @@ h1, h2, h3 { margin: 0; line-height: 1.15; }
 .sw { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); font-weight: 700; }
 .sw input { width: 22px; height: 22px; accent-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* a brief cat-sound caption, e.g. "Mrrp!" */
+.caption { align-self: flex-start; padding: 6px 14px; border-radius: 18px 18px 18px 6px; background: #fff; border: 1px solid var(--line); box-shadow: var(--shadow); font-weight: 800; font-size: 15px; font-family: var(--font-hand), cursive; letter-spacing: .02em; animation: pop .25s ease-out, fade .5s ease 1.9s forwards; pointer-events: none; }
+@keyframes pop { from { transform: scale(.7) translateY(4px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes fade { to { opacity: 0; transform: translateY(-4px); } }
+.act { font-size: 13px; }
+.sw input[type=range] { width: 140px; height: 28px; }

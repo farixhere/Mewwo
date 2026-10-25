@@ -275,6 +275,11 @@ function SettingsSheet() {
     <Sheet title="Settings" sub={`${v.household.name} · ${v.household.timeZone}`} onClose={() => openPanel(null)}>
       <label className="sw">Sound<input type="checkbox" checked={sound.master} onChange={(e) => { audio.unlock(); setSound({ master: e.target.checked }); }} /></label>
       <label className="sw">Cat sounds & effects<input type="checkbox" checked={sound.effects} onChange={(e) => setSound({ effects: e.target.checked })} /></label>
+      <label className="sw">Show cat sounds as text (&quot;Mrrp!&quot;)<input type="checkbox" checked={sound.captions} onChange={(e) => setSound({ captions: e.target.checked })} /></label>
+      <label className="sw">Cat voice volume
+        <input type="range" min={0} max={1} step={0.05} value={sound.voice} aria-label="Cat voice volume"
+          onChange={(e) => setSound({ voice: Number(e.target.value) })} onPointerUp={() => { audio.unlock(); audio.vocalize('chirp', { intensity: 0.5, priority: 5, pitch: 1.1, seed: Date.now() % 1000 }); }} />
+      </label>
       <label className="sw">Ambient (room tone, birds)<input type="checkbox" checked={sound.ambient} onChange={(e) => setSound({ ambient: e.target.checked })} /></label>
       <h3 style={{ marginTop: 16, fontSize: 16 }}>Graphics</h3>
       <div className="seg" role="radiogroup" aria-label="Graphics quality">

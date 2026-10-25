@@ -13,6 +13,8 @@ import { decisionRng, mulberry32, hashString } from '../sim/rng';
 import { reinforce, familiarize } from '../sim/learning';
 import { daylight, localHour } from '../sim/time';
 import type { CatSim, SimEvent, WorldObject } from '../sim/types';
+import { canHearCall, decideReaction, decodeReaction, encodeReaction, petStreak, voiceTraits, type EventKind } from '../sim/voice';
+import { pickDestination } from '../world/place';
 import { GARDEN_SEED, HOME_SEED, LOCATIONS, OBJECT_DEFS, STARTING_INVENTORY, defOf } from '../world/catalog';
 import { buildGrid, nearestFreeCell, cellCenter, validatePlacement } from '../world/nav';
 
@@ -336,6 +338,8 @@ async function buildView(c: Ctx) {
       id: sim.id, name: c.catRow.name, coatSeed: c.catRow.coatSeed, bornAt: sim.bornAt, ageDays: age,
       stage: sim.stage, stageLabel: stageLabel(sim.stage), proportions: proportionsFor(age),
       traits: describePersonality(sim.personality),
+      personality: Object.fromEntries(Object.entries(sim.personality).map(([k, v]) => [k, Math.round(v * 100) / 100])) as Record<string, number>,
+      reaction: (() => { const rx = decodeReaction(sim.familiarity); return rx ? { ...rx, byMe: rx.by === hashString(c.userId) % 1_000_000 } : null; })(),
       favourites: Object.fromEntries(Object.entries(sim.preferences).filter(([, v]) => v >= 0.45).map(([k, v]) => [k, Math.round(v * 100) / 100])),
       activity: sim.activity, activityLabel: activityLabel(sim.activity), asleep: !ACTIVITY_DEFS[sim.activity].awake,
       mood: moodWord(n, sim.activity), hints: careHints(n),
@@ -398,6 +402,15 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
       lastInteractionAt: new Date(c.now),
     };
   };
+  /** Record how the cat reacts to what was just done, so both owners see and hear the same thing. */
+  const speak = (kind: EventKind, o: { distance?: number; streak?: number; x?: number; z?: number } = {}) => {
+    const rx = decideReaction({
+      kind, catId: sim.id, salt: c.now, personality: sim.personality, needs: c.sim.needs, activity: sim.activity,
+      distance: o.distance, familiarity: c.relationship.familiarity, streak: o.streak,
+    });
+    c.sim.familiarity = { ...c.sim.familiarity };
+    encodeReaction(c.sim.familiarity, rx, c.now, c.userId, o.x, o.z);
+  };
   const memory = async (kind: string, title: string, body?: string) => {
     c.events.push({ kind: kind as SimEvent['kind'], dedupeKey: `${kind}:${c.userId}`, title, body, at: c.now });
   };
@@ -423,17 +436,37 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
       return 'Fresh water poured.';
     }
     case 'pet': {
+      const fam = { ...sim.familiarity };
+      const traits = voiceTraits(sim.personality, sim.id);
+      const sleeping = !ACTIVITY_DEFS[sim.activity].awake;
+      const ps = petStreak(fam, c.now, traits);
+      if (ps.overstim && !sleeping) {
+        // Enough fuss. She turns away and pads off for a bit; nothing punitive, and it passes.
+        const grid = buildGrid(sim.location, c.objects);
+        const dest = pickDestination(grid, { x: sim.x, z: sim.z }, rng, 3);
+        c.sim = {
+          ...sim, familiarity: fam, needs: { ...sim.needs, stress: Math.min(0.7, sim.needs.stress + 0.04) },
+          activity: 'retreat', targetId: null, destX: dest.x, destZ: dest.z, activitySince: c.now, activityUntil: c.now + 75_000,
+        };
+        speak('pet_overstim', { streak: ps.streak });
+        return `${catName} has had enough fuss for now and pads away.`;
+      }
       const r = reactToPerson(sim, 'pet', c.relationship.familiarity);
-      c.sim = { ...r.cat, prevActivity: sim.prevActivity };
-      if (!r.accepted) return reactionText(r.mood, catName);
+      c.sim = { ...r.cat, familiarity: fam, prevActivity: sim.prevActivity };
+      if (!r.accepted) {
+        speak(r.mood === 'asleep' ? 'pet_asleep' : r.mood === 'wary' ? 'pet_wary' : 'pet_overstim', { streak: ps.streak });
+        return reactionText(r.mood, catName);
+      }
+      speak('pet_ok', { streak: ps.streak });
       bumpRel('pet');
       await memory('first_pet', `${c.userName}'s first cuddle`, `${catName} leaned right into it.`);
-      return `${catName} purrs and leans into your hand.`;
+      return `${catName} leans into your hand.`;
     }
     case 'treat': {
       await spend(c, 'treat', 'treats');
       const r = reactToPerson(sim, 'treat', c.relationship.familiarity);
       c.sim = { ...r.cat, prevActivity: sim.prevActivity };
+      speak('treat');
       bumpRel('treat');
       return `${catName} crunches the treat happily.`;
     }
@@ -443,7 +476,7 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
       if (t.location !== sim.location) throw new GameError(409, `${catName} is in the ${LOCATIONS[sim.location]?.label.toLowerCase() ?? 'other room'} right now.`);
       const r = reactToPerson(sim, 'play', c.relationship.familiarity);
       c.sim = { ...r.cat, prevActivity: sim.prevActivity };
-      if (!r.accepted) return reactionText(r.mood, catName);
+      if (!r.accepted) { if (r.mood === 'tired') speak('play_tired'); return reactionText(r.mood, catName); }
       bumpRel('play');
       const chance = 0.5 + 0.45 * sim.personality.playfulness;
       if (rng() < chance) {
@@ -455,8 +488,10 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
         next.activityUntil = c.now + (3 + rng() * 4) * MINUTE;
         reinforce(next.preferences, `toy:${t.id}`, 0.05);
         familiarize(next.familiarity, t.id, 0.1);
+        speak('play_go');
         return `${catName} spots the ${OBJECT_DEFS[t.type]!.label.toLowerCase()} and crouches low...`;
       }
+      speak('play_wait');
       return `${catName} watches the toy with interest, but isn't quite ready to pounce.`;
     }
     case 'call': {
@@ -464,13 +499,16 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
       if (!loc) throw new GameError(400, 'Unknown place.');
       const p = { x: Math.max(loc.bounds.minX + 0.3, Math.min(loc.bounds.maxX - 0.3, a.x)), z: Math.max(loc.bounds.minZ + 0.3, Math.min(loc.bounds.maxZ - 0.3, a.z)) };
       const asleep = !ACTIVITY_DEFS[sim.activity].awake;
+      const distance = Math.hypot(sim.x - p.x, sim.z - p.z);
+      if (!canHearCall(sim, distance)) { speak('call_unheard', { distance, x: p.x, z: p.z }); return `${catName} doesn't stir.`; }
       const chance = Math.max(0.08, Math.min(0.9,
         0.28 + 0.45 * sim.personality.sociability + 0.25 * c.relationship.familiarity - 0.25 * sim.personality.independence - (asleep ? 0.3 : 0) - sim.needs.stress * 0.3));
-      if (rng() >= chance) return `${catName} glances over, then carries on with her own plans.`;
+      if (rng() >= chance) { speak('call_ignored', { distance, x: p.x, z: p.z }); return `${catName} glances over, then carries on with her own plans.`; }
       const g = buildGrid(sim.location, c.objects);
       const cell = nearestFreeCell(g, p);
       const dest = cell ? cellCenter(g, cell.c, cell.r) : p;
       c.sim = { ...sim, activity: 'approach_person', targetId: null, destX: dest.x, destZ: dest.z, activitySince: c.now, activityUntil: c.now + 70_000 };
+      speak('call_noticed', { distance, x: p.x, z: p.z });
       bumpRel('call');
       return `${catName} pads over to see what you're up to.`;
     }
