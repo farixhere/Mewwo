@@ -4,7 +4,7 @@ import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useGame } from '@/lib/client/store';
 import { planMotion, placeAt, type MotionInput } from '@/lib/client/motion';
-import { NEUTRAL, blend, poseFor, type Pose } from '@/lib/client/pose';
+import { NEUTRAL, applyReactionBody, blend, poseFor, reactionEnvelope, type Pose } from '@/lib/client/pose';
 import { birdsAbout } from '@/lib/sim/brain';
 import { COATS, blobTexture, mat } from './materials';
 import { audio } from '@/lib/client/audio';
@@ -111,7 +111,27 @@ export function Cat() {
       stress: 1 - v.cat.needs.calm, energy: v.cat.needs.energy, birds, trust: 0.6,
     });
     pose.current = blend(pose.current, target, 1 - Math.exp(-(pl.moving ? 9 : 5) * dt));
-    const p = pose.current;
+    let p = pose.current;
+    // Communication overlay: a glance and a posture on top of whatever she is doing, from the shared reaction.
+    const fx = useGame.getState().voiceFx;
+    let gazeYaw = 0;
+    if (fx) {
+      const tfx = (nowMs - fx.startedAt) / 1000;
+      const env = reactionEnvelope(tfx, fx.dur);
+      if (env > 0) {
+        p = applyReactionBody(p, fx.body, env, fx.intensity);
+        if (fx.gaze !== 'none') {
+          let tx = fx.x, tz = fx.z;
+          if (fx.gaze === 'food' || fx.gaze === 'water') {
+            const bowl = v.objects.find((o) => o.location === v.cat.location && o.type === (fx.gaze === 'food' ? 'food_bowl' : 'water_bowl'));
+            if (bowl) { tx = bowl.x; tz = bowl.z; }
+          }
+          // No known point (the player): look toward the camera, which is where the owners are.
+          const toward = fx.gaze === 'away' ? P.h + 2.2 : (tx || tz) ? Math.atan2(tx - P.x, tz - P.z) : Math.PI / 4;
+          gazeYaw = Math.max(-1.1, Math.min(1.1, angleDiff(P.h, toward))) * env * (fx.gaze === 'away' ? 0.55 : 0.9);
+        }
+      }
+    }
     const time = state.clock.elapsedTime;
     const clumsy = prop.clumsiness;
 
@@ -200,7 +220,7 @@ export function Cat() {
     const drift = awakeStill * (0.22 * Math.sin(time * 0.43 + seed) + 0.12 * Math.sin(time * 1.1 + seed * 2));
     const lead = Math.max(-0.5, Math.min(0.5, -turnRate * 0.12)) * wk;
     h.rotation.x = p.headPitch - pitch * 0.75 + 0.05 * awakeStill * Math.sin(time * 0.31 + seed) - (P.pitch * 0.6);
-    h.rotation.y = p.headYaw + drift + lead;
+    h.rotation.y = p.headYaw + drift + lead + gazeYaw;
     h.rotation.z = p.headRoll;
     h.scale.setScalar(prop.head);
     // An occasional ear flick, on one side at a time.

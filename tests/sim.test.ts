@@ -425,3 +425,160 @@ test('framing leaves room for the HUD on phones and desktops', () => {
   // a narrow free area gives a smaller zoom than a wide one
   assert.ok(fitZoom(10, 8, { w: 300, h: 600 }) < fitZoom(10, 8, { w: 900, h: 600 }));
 });
+
+// ---------- cat communication ----------
+import { decideReaction, voiceTraits, petLimit, petStreak, canHearCall, encodeReaction, decodeReaction, mayVocalise, VOCALS, CAPTIONS, RX, type EventInput } from '../lib/sim/voice.ts';
+import { applyReactionBody, reactionEnvelope } from '../lib/client/pose.ts';
+
+function vin(over: Partial<EventInput> = {}): EventInput {
+  const cat = newCat();
+  return { kind: 'pet_ok', catId: cat.id, salt: 1, personality: cat.personality, needs: { ...cat.needs, stress: 0.1, comfort: 0.8 }, activity: 'idle', ...over };
+}
+
+test('reactions are deterministic: the same situation gives the same result', () => {
+  for (const kind of ['call_noticed', 'pet_ok', 'call_arrived', 'treat'] as const) {
+    assert.deepEqual(decideReaction(vin({ kind, salt: 42 })), decideReaction(vin({ kind, salt: 42 })));
+  }
+});
+
+test('the cat is sometimes silent, and sometimes not', () => {
+  let silent = 0, loud = 0;
+  for (let salt = 0; salt < 300; salt++) {
+    const r = decideReaction(vin({ kind: 'pet_ok', salt }));
+    if (r.sound === 'none') silent++; else loud++;
+  }
+  assert.ok(silent > 30, `silent ${silent}`);
+  assert.ok(loud > 30, `loud ${loud}`);
+});
+
+test('she never hisses without a reason', () => {
+  for (let salt = 0; salt < 400; salt++) {
+    for (const kind of ['call_noticed', 'call_ignored', 'call_arrived', 'pet_ok', 'pet_asleep', 'pet_wary', 'treat', 'play_go', 'play_wait', 'play_tired'] as const) {
+      assert.notEqual(decideReaction(vin({ kind, salt })).sound, 'hiss', kind);
+    }
+    // calm and tolerant handling never warns either
+    assert.notEqual(decideReaction(vin({ kind: 'pet_overstim', salt, streak: 1, needs: { ...newCat().needs, stress: 0.05 } })).sound, 'hiss');
+  }
+});
+
+test('a stressed low-tolerance cat that has been over-petted may warn, nobody else', () => {
+  const cat = newCat();
+  const shy = { ...cat.personality, sociability: 0.1, cautiousness: 0.9, independence: 0.9 };
+  const t = voiceTraits(shy, cat.id);
+  const streak = petLimit(t) + 4;
+  const r = decideReaction({ kind: 'pet_overstim', catId: cat.id, salt: 1, personality: shy, needs: { ...cat.needs, stress: 0.6 }, activity: 'idle', streak });
+  assert.equal(r.sound, 'hiss');
+  assert.equal(r.priority, 5);
+  assert.equal(r.body, 'recoil');
+});
+
+test('captions are short cat noises, never sentences', () => {
+  for (const c of CAPTIONS) assert.ok(c.length <= 10 && c.split(' ').length <= 1, c);
+  for (let salt = 0; salt < 200; salt++) {
+    const r = decideReaction(vin({ kind: 'call_noticed', salt, distance: 2 }));
+    assert.ok(r.caption >= 0 && r.caption < CAPTIONS.length);
+  }
+});
+
+test('hunger makes a chatty cat plead, looking at the food', () => {
+  const cat = newCat();
+  const hungry = { ...cat.needs, satiety: 0.1 };
+  const chatty = { ...cat.personality, sociability: 0.9 };
+  let pleas = 0;
+  for (let i = 0; i < 100; i++) {
+    const r = decideReaction({ kind: 'activity', catId: `chatty-${i}`, salt: i, personality: chatty, needs: hungry, activity: 'seek_attention' });
+    if (r.sound === 'meow_plea') { pleas++; assert.equal(r.gaze, 'food'); assert.equal(r.priority, 4); }
+  }
+  assert.ok(pleas > 20);
+  // a fed cat asking for attention does not plead
+  for (let i = 0; i < 100; i++) {
+    assert.notEqual(decideReaction({ kind: 'activity', catId: `c-${i}`, salt: i, personality: chatty, needs: cat.needs, activity: 'seek_attention' }).sound, 'meow_plea');
+  }
+});
+
+test('sound follows what she is really doing', () => {
+  const quiet = ['idle', 'eat', 'drink', 'groom', 'litter', 'scratch', 'stretch', 'hide', 'retreat', 'explore', 'return_home'] as const;
+  for (const activity of quiet) {
+    for (let salt = 0; salt < 50; salt++) {
+      assert.equal(decideReaction(vin({ kind: 'activity', activity, salt })).sound, 'none', activity);
+    }
+  }
+  let chatter = 0;
+  for (let i = 0; i < 100; i++) if (decideReaction({ kind: 'activity', catId: `b-${i}`, salt: i, personality: newCat().personality, needs: newCat().needs, activity: 'watch_bird' }).sound === 'chatter') chatter++;
+  assert.ok(chatter > 10);
+});
+
+test('personality shapes the response: sociable cats greet more than aloof ones', () => {
+  const cat = newCat();
+  const count = (sociability: number) => {
+    let n = 0;
+    for (let i = 0; i < 400; i++) {
+      const r = decideReaction({ kind: 'call_arrived', catId: `s-${i % 40}`, salt: i, personality: { ...cat.personality, sociability }, needs: cat.needs, activity: 'idle', familiarity: 0.5 });
+      if (r.sound !== 'none') n++;
+    }
+    return n;
+  };
+  assert.ok(count(0.9) > count(0.1) + 40);
+});
+
+test('a distant sleeper does not hear a call; a nearby or light sleeper does', () => {
+  const asleep = { activity: 'sleep' as const, needs: { ...newCat().needs, energy: 0.2 } };
+  assert.equal(canHearCall(asleep, 9), false);
+  assert.equal(canHearCall(asleep, 2), true);
+  assert.equal(canHearCall({ activity: 'idle', needs: newCat().needs }, 10), true);
+});
+
+test('petting streaks build up, reset after a pause, and tolerance decides the limit', () => {
+  const cat = newCat();
+  const patient = voiceTraits({ ...cat.personality, sociability: 0.95, cautiousness: 0.05, independence: 0.05 }, cat.id);
+  const prickly = voiceTraits({ ...cat.personality, sociability: 0.05, cautiousness: 0.95, independence: 0.95 }, cat.id);
+  assert.ok(petLimit(patient) > petLimit(prickly));
+  const fam: Record<string, number> = {};
+  let t = T0, last = { streak: 0, overstim: false };
+  for (let i = 0; i < petLimit(prickly) + 1; i++) { last = petStreak(fam, t, prickly); t += 3000; }
+  assert.equal(last.overstim, true);
+  const later = petStreak(fam, t + 120_000, prickly);
+  assert.equal(later.streak, 1);
+  assert.equal(later.overstim, false);
+});
+
+test('a reaction survives being stored and shared, and old data is left alone', () => {
+  const fam: Record<string, number> = { 'some-object-id': 0.4 };
+  const r = decideReaction(vin({ kind: 'call_noticed', salt: 7, distance: 2 }));
+  encodeReaction(fam, r, T0, 'user-a', 1.5, -2);
+  assert.equal(fam['some-object-id'], 0.4);
+  const back = decodeReaction(fam)!;
+  assert.equal(back.sound, r.sound);
+  assert.equal(back.body, r.body);
+  assert.equal(back.gaze, r.gaze);
+  assert.equal(back.at, T0);
+  assert.equal(back.x, 1.5);
+  assert.equal(decodeReaction({}), null);
+  assert.equal(decodeReaction({ [RX.at]: 1, [RX.kind]: 99 }), null);
+  assert.ok(VOCALS.includes(back.sound));
+});
+
+test('quiet sounds never cut across louder ones, but important ones can', () => {
+  const busy = { until: 10_000, priority: 3, sound: 'meow' as const };
+  assert.equal(mayVocalise(busy, { priority: 2, sound: 'purr' }, 5_000), false);
+  assert.equal(mayVocalise(busy, { priority: 3, sound: 'chirp' }, 5_000), false);
+  assert.equal(mayVocalise(busy, { priority: 4, sound: 'meow_plea' }, 5_000), true);
+  assert.equal(mayVocalise(busy, { priority: 1, sound: 'purr' }, 11_000), true);
+  assert.equal(mayVocalise(null, { priority: 1, sound: 'purr' }, 0), true);
+});
+
+test('body-language overlays nudge the pose smoothly and fade out', () => {
+  assert.equal(reactionEnvelope(-1, 2), 0);
+  assert.equal(reactionEnvelope(3, 2), 0);
+  assert.ok(reactionEnvelope(1, 2) > 0.9);
+  assert.ok(reactionEnvelope(0.05, 2) < reactionEnvelope(0.18, 2));
+  assert.deepEqual(applyReactionBody(NEUTRAL, 'greet', 0), NEUTRAL);
+  const g = applyReactionBody(NEUTRAL, 'greet', 1, 0.8);
+  assert.ok(g.tailLift > NEUTRAL.tailLift + 0.5, 'tail goes up to greet');
+  const rc = applyReactionBody(NEUTRAL, 'recoil', 1, 0.8);
+  assert.ok(rc.earBack > 0.5 && rc.tailLift < NEUTRAL.tailLift);
+  const ln = applyReactionBody(NEUTRAL, 'lean', 1, 0.8);
+  assert.ok(ln.eyeOpen < NEUTRAL.eyeOpen && ln.headRoll > 0);
+  assert.notEqual(g, NEUTRAL); // returns a copy, never mutates the source pose
+  assert.equal(NEUTRAL.tailLift, 0.35);
+});

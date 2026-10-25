@@ -3,6 +3,7 @@ import dynamic from 'next/dynamic';
 import { useEffect, useState } from 'react';
 import { useGame } from '@/lib/client/store';
 import { Hud } from './Hud';
+import { CatVoice } from './CatVoice';
 
 // Three.js is browser-only and large: load it after the shell so the first paint is fast.
 const GameCanvas = dynamic(() => import('./scene/GameCanvas').then((m) => m.GameCanvas), {
@@ -64,6 +65,7 @@ export function GameShell({ onAuthLost }: { onAuthLost: () => void }) {
       {status === 'reconnecting' && <div className="banner" role="status">Reconnecting… your changes are safe on the server.</div>}
       <main className="stage" aria-label="3D home"><GameCanvas /></main>
       <Hud />
+      <CatVoice />
       {away && (
         <section className="sheet" role="dialog" aria-label="While you were away">
           <button className="close" onClick={() => setAway(null)} aria-label="Close">×</button>

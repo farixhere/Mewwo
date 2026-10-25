@@ -165,3 +165,69 @@ export function blend(from: Pose, to: Pose, k: number): Pose {
   for (const key of Object.keys(to) as (keyof Pose)[]) out[key] = from[key] + (to[key] - from[key]) * k;
   return out;
 }
+
+// ---------------------------------------------------------------- reaction overlays
+
+export type ReactionBody = 'none' | 'greet' | 'lean' | 'recoil' | 'alert' | 'settle' | 'perk';
+
+/** 0 -> 1 -> 0 envelope over `dur` seconds: quick to react, slow to relax. */
+export function reactionEnvelope(t: number, dur: number): number {
+  if (t < 0 || t > dur) return 0;
+  const attack = Math.min(1, t / 0.18);
+  const release = Math.min(1, (dur - t) / 0.6);
+  const e = Math.min(attack, release);
+  return e * e * (3 - 2 * e);
+}
+
+/**
+ * Lays a communicative posture over whatever the cat is already doing, scaled by `env` (0..1). It only nudges
+ * channels, so the underlying activity (walking, sitting, sleeping) carries on and blends smoothly in and out.
+ */
+export function applyReactionBody(p: Pose, body: ReactionBody, env: number, intensity = 0.6): Pose {
+  if (body === 'none' || env <= 0) return p;
+  const q = { ...p };
+  const k = env * (0.5 + 0.5 * intensity);
+  switch (body) {
+    case 'perk': // ears up and forward, head lifted: "I heard that"
+      q.earBack = p.earBack + (-0.25 - p.earBack) * k;
+      q.earSwivel = p.earSwivel + 0.5 * k;
+      q.headPitch = p.headPitch - 0.12 * k;
+      q.eyeOpen = Math.min(1, p.eyeOpen + 0.15 * k);
+      break;
+    case 'greet': // tail straight up, a little bounce of the head
+      q.tailLift = p.tailLift + (1.25 - p.tailLift) * k;
+      q.tailSway = p.tailSway * (1 - k) + 0.05 * k;
+      q.earBack = p.earBack + (-0.15 - p.earBack) * k;
+      q.headPitch = p.headPitch - 0.1 * k;
+      break;
+    case 'lean': // pressing into a hand: head tilted and pushing, eyes softly narrowed
+      q.headRoll = p.headRoll + 0.28 * k;
+      q.headPitch = p.headPitch + 0.12 * k;
+      q.eyeOpen = p.eyeOpen * (1 - 0.5 * k);
+      q.earBack = p.earBack + 0.2 * k;
+      q.tailLift = p.tailLift + 0.25 * k;
+      q.lean = p.lean + 0.3 * k;
+      break;
+    case 'recoil': // enough, thanks: ears flat-ish, low, tail down
+      q.earBack = p.earBack + (0.8 - p.earBack) * k;
+      q.crouch = Math.min(1, p.crouch + 0.3 * k);
+      q.tailLift = p.tailLift * (1 - 0.9 * k);
+      q.tailSway = p.tailSway + 0.5 * k;
+      q.headPitch = p.headPitch + 0.1 * k;
+      break;
+    case 'alert': // locked on: head up, ears swivelled, tail still
+      q.headPitch = p.headPitch - 0.15 * k;
+      q.earBack = p.earBack + (-0.2 - p.earBack) * k;
+      q.earSwivel = p.earSwivel + 0.6 * k;
+      q.tailSway = p.tailSway * (1 - 0.6 * k);
+      q.eyeOpen = Math.min(1, p.eyeOpen + 0.2 * k);
+      break;
+    case 'settle': // sleepy: slow blink, head sinking
+      q.eyeOpen = p.eyeOpen * (1 - 0.6 * k);
+      q.headPitch = p.headPitch + 0.2 * k;
+      q.earBack = p.earBack + 0.15 * k;
+      q.tailSway = p.tailSway * (1 - 0.7 * k);
+      break;
+  }
+  return q;
+}

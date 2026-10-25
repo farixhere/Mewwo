@@ -2,6 +2,7 @@
 import { create } from 'zustand';
 import type { GameView } from '@/lib/server/game';
 import { PollingTransport, type Transport } from './realtime';
+import type { Body, Gaze } from '@/lib/sim/voice';
 import { NEXT_HIGHER, NEXT_LOWER, detectQuality, type Quality, type QualityChoice } from './quality';
 
 export type Selection =
@@ -27,7 +28,11 @@ interface Store {
   moveCheck: { ok: boolean; reason?: string } | null;
   toasts: Toast[];
   busy: boolean;
-  sound: { master: boolean; effects: boolean; ambient: boolean };
+  sound: { master: boolean; effects: boolean; ambient: boolean; voice: number; captions: boolean };
+  /** A short cat-sound caption such as "Mrrp!", or null. Never more than one, never a history. */
+  caption: { id: number; text: string } | null;
+  /** The posture and glance of the cat's current reaction (read by the 3D cat every frame). */
+  voiceFx: { id: number; body: Body; gaze: Gaze; x: number; z: number; startedAt: number; dur: number; intensity: number } | null;
   /** Active render tier and what the player chose ('auto' lets the device and frame rate decide). */
   quality: Quality;
   qualityChoice: QualityChoice;
@@ -48,6 +53,8 @@ interface Store {
   toast(text: string, tone?: Toast['tone']): void;
   dismissToast(id: number): void;
   setSound(p: Partial<Store['sound']>): void;
+  showCaption(text: string): void;
+  setVoiceFx(fx: Store['voiceFx']): void;
   setQualityChoice(c: QualityChoice): void;
   degradeQuality(): void;
   upgradeQuality(): void;
@@ -61,9 +68,9 @@ let toastId = 1;
 function loadSound(): Store['sound'] {
   try {
     const raw = localStorage.getItem('mewwo.sound');
-    if (raw) return { master: true, effects: true, ambient: true, ...JSON.parse(raw) };
+    if (raw) return { master: true, effects: true, ambient: true, voice: 0.8, captions: true, ...JSON.parse(raw) };
   } catch { /* storage may be unavailable */ }
-  return { master: true, effects: true, ambient: true };
+  return { master: true, effects: true, ambient: true, voice: 0.8, captions: true };
 }
 
 export const useGame = create<Store>((set, get) => ({
@@ -79,7 +86,9 @@ export const useGame = create<Store>((set, get) => ({
   moveCheck: null,
   toasts: [],
   busy: false,
-  sound: { master: true, effects: true, ambient: true },
+  sound: { master: true, effects: true, ambient: true, voice: 0.8, captions: true },
+  caption: null,
+  voiceFx: null,
   quality: 'medium',
   qualityChoice: 'auto',
   cameraNonce: 0,
@@ -179,6 +188,13 @@ export const useGame = create<Store>((set, get) => ({
     set({ sound: next });
     try { localStorage.setItem('mewwo.sound', JSON.stringify(next)); } catch { /* ignore */ }
   },
+
+  showCaption(text) {
+    const id = toastId++;
+    set({ caption: { id, text } });
+    setTimeout(() => { if (get().caption?.id === id) set({ caption: null }); }, 2400);
+  },
+  setVoiceFx: (voiceFx) => set({ voiceFx }),
 
   setQualityChoice(choice) {
     set({ qualityChoice: choice, quality: choice === 'auto' ? detectQuality() : choice });
