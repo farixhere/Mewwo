@@ -8,9 +8,17 @@ import { NEUTRAL, blend, poseFor, type Pose } from '@/lib/client/pose';
 import { birdsAbout } from '@/lib/sim/brain';
 import { COATS, blobTexture, mat } from './materials';
 import { audio } from '@/lib/client/audio';
+import { angleDiff, turnToward } from '@/lib/world/kinematics';
 
 const TAIL_SEGMENTS = 5;
-const LEG = 0.22;
+const UP = 0.12;   // upper leg (shoulder/hip to elbow/knee)
+const LOW = 0.12;  // lower leg (to the paw)
+const PAW_R = 0.048;
+const STANCE = 0.6; // fraction of a stride a foot spends on the ground
+const OFFSETS_WALK = [0, 0.5, -0.25, 0.25]; // FL, FR, HL, HR: lateral-sequence walk
+const OFFSETS_TROT = [0, 0.5, 0.5, 0];      // diagonal pairs
+const smooth01 = (u: number) => u * u * (3 - 2 * u);
+const frac = (x: number) => x - Math.floor(x);
 
 /**
  * A procedural cat. The asset interface is `<Cat />`: replace the body of this component with a rigged GLTF
@@ -27,15 +35,16 @@ export function Cat() {
   const eyeR = useRef<THREE.Mesh>(null);
   const tail = useRef<(THREE.Group | null)[]>([]);
   const legs = useRef<(THREE.Group | null)[]>([]);
-  const legMesh = useRef<(THREE.Mesh | null)[]>([]);
+  const knees = useRef<(THREE.Group | null)[]>([]);
   const shadow = useRef<THREE.Mesh>(null);
 
   const pose = useRef<Pose>({ ...NEUTRAL });
-  const pos = useRef({ x: 0, z: 0, y: 0, h: 0, init: false });
+  const pos = useRef({ x: 0, z: 0, y: 0, h: 0, init: false, speed: 0, pitch: 0, roll: 0, trot: 0, lastSteps: 0 });
   const phase = useRef(0);
+  const idleSeed = useRef(Math.random() * 100);
+  const flick = useRef({ next: 3, t: -1, side: 0 });
   const blink = useRef({ next: 2, t: -1 });
   const lastAct = useRef<string>('');
-  const lastStep = useRef(0);
 
   const view = useGame((s) => s.view);
   const viewLocation = useGame((s) => s.viewLocation);
@@ -74,12 +83,20 @@ export function Cat() {
     const pl = placeAt(plan, input, nowMs);
     const P = pos.current;
     if (!P.init) { P.x = pl.x; P.z = pl.z; P.y = pl.y; P.h = pl.heading; P.init = true; }
-    // Ease toward the computed place so corrections after a refresh never pop.
-    const k = 1 - Math.exp(-10 * dt);
-    P.x += (pl.x - P.x) * k; P.z += (pl.z - P.z) * k; P.y += (pl.y - P.y) * (1 - Math.exp(-8 * dt));
-    let dh = pl.heading - P.h;
-    dh = Math.atan2(Math.sin(dh), Math.cos(dh));
-    P.h += dh * (1 - Math.exp(-(pl.moving ? 9 : 4) * dt));
+    // Follow the analytic placement closely; a big gap (first frame, tab restored) snaps instead of sliding.
+    const prevX = P.x, prevZ = P.z;
+    const gap = Math.hypot(pl.x - P.x, pl.z - P.z);
+    if (gap > 1.5) { P.x = pl.x; P.z = pl.z; } else {
+      const k = 1 - Math.exp(-18 * dt);
+      P.x += (pl.x - P.x) * k; P.z += (pl.z - P.z) * k;
+    }
+    P.y += (pl.y - P.y) * (1 - Math.exp(-9 * dt));
+    const disp = Math.hypot(P.x - prevX, P.z - prevZ);
+    const realSpeed = dt > 0 ? disp / dt : 0;
+    // Turn at a limited, eased rate: quicker when walking, lazy when settling in.
+    const prevH = P.h;
+    P.h = turnToward(P.h, pl.heading, dt, pl.moving ? 10 : 5, pl.moving ? 5.5 : 3);
+    const turnRate = dt > 0 ? angleDiff(prevH, P.h) / dt : 0;
     g.position.set(P.x, P.y, P.z);
     g.rotation.y = P.h;
 
@@ -98,53 +115,103 @@ export function Cat() {
     const time = state.clock.elapsedTime;
     const clumsy = prop.clumsiness;
 
-    // ---- body
-    const legLen = LEG * prop.legs;
-    const standY = legLen + 0.12 * prop.body;
+    // ---- gait: the stride phase is locked to ground distance actually covered, so feet never slide
+    const speedNorm = Math.min(1, realSpeed / 2);
+    P.trot += ((pl.trot ? 1 : 0) - P.trot) * (1 - Math.exp(-4 * dt));
+    const amp = (0.3 + 0.16 * speedNorm) * (0.6 + 0.4 * Math.min(1, p.walk)) * (1 + clumsy * 0.12);
+    const legScale = prop.legs * (1 - 0.1 * Math.max(p.lie, p.curl));
+    const R = (UP + LOW) * legScale;
+    const strideLen = Math.max(0.12, (2 * R * Math.sin(amp)) / STANCE);
+    if (disp > 1e-5 && p.walk > 0.15) phase.current += disp / strideLen;
+    const steps = Math.floor(phase.current * 2);
+    if (steps !== P.lastSteps) {
+      if (pl.moving && p.walk > 0.5) audio.step();
+      P.lastSteps = steps;
+    }
+
     const sit = p.sit, lie = Math.max(p.lie, p.curl);
-    let bodyY = standY * (1 - 0.52 * sit - 0.7 * lie) - p.crouch * legLen * 0.5 + p.raise * 0.1 - p.stretchF * 0.06;
-    bodyY += Math.abs(Math.sin(phase.current)) * 0.018 * p.walk * (1 + clumsy * 0.6);
+    const legAng = [0, 0, 0, 0], kneeAng = [0, 0, 0, 0];
+    const wk = Math.min(1, p.walk);
+    for (let i = 0; i < 4; i++) {
+      const front = i < 2;
+      const off = OFFSETS_WALK[i]! * (1 - P.trot) + OFFSETS_TROT[i]! * P.trot;
+      const s01 = frac(phase.current + off);
+      const A = amp * (front ? 1 : 0.9) * wk;
+      let h: number, k: number;
+      if (s01 < STANCE) {
+        const u = s01 / STANCE;
+        h = -A + 2 * A * u;                       // foot sweeps back at ground speed
+        k = (front ? 0.08 : 0.3) + 0.12 * u;
+      } else {
+        const u = (s01 - STANCE) / (1 - STANCE);
+        h = A - 2 * A * smooth01(u);              // swing forward
+        k = (front ? 0.08 : 0.3) + (front ? 1.0 : 1.15) * Math.sin(Math.PI * u) * wk;
+      }
+      const kneadSwing = (i < 2 ? (i === 0 ? 1 : -1) : 0) * Math.sin(time * 5) * 0.4 * p.bob * (input.activity === 'scratch' ? 1 : 0);
+      legAng[i] = h * wk + kneadSwing;
+      kneeAng[i] = k * wk + (front ? 0.08 : 0.3) * (1 - wk);
+    }
+    // Posture overrides (sitting, lying, rearing, stretching), blended in by the pose channels.
+    const pitch = -0.85 * sit - 1.05 * p.raise + 0.38 * p.stretchF + 0.05 * p.crouch;
+    const frontPose = -1.9 * p.raise - 0.9 * p.stretchF - pitch * 0.9 + 0.3 * lie;
+    const hindPose = -1.25 * sit - 1.1 * lie + 0.15 * p.stretchF - pitch * 0.2;
+    const fold = 1.5 * sit + 1.3 * lie + 0.5 * p.crouch;
+    for (let i = 0; i < 4; i++) {
+      const lg = legs.current[i], kn = knees.current[i];
+      if (!lg || !kn) continue;
+      lg.rotation.x = legAng[i]! + (i < 2 ? frontPose : hindPose);
+      kn.rotation.x = kneeAng[i]! + (i < 2 ? fold * 0.3 : fold);
+      lg.scale.setScalar(legScale);
+    }
+
+    // ---- body height: the lowest planted foot decides it while walking, posture decides it otherwise
+    let reach = 0;
+    for (let i = 0; i < 4; i++) {
+      const fy = (UP * Math.cos(legAng[i]!) + LOW * Math.cos(legAng[i]! + kneeAng[i]!) + PAW_R) * legScale;
+      if (fy > reach) reach = fy;
+    }
+    const standY = (UP + LOW + PAW_R) * legScale + 0.05;
+    const walkY = reach + 0.05;
+    const postureY = standY * (1 - 0.5 * sit - 0.68 * lie) - p.crouch * R * 0.5 + p.raise * 0.1 - p.stretchF * 0.06;
+    let bodyY = postureY + (walkY - standY) * wk;
     bodyY += p.bob * 0.01 * Math.sin(time * 14);
+
+    // Accelerating tips the nose down, braking rocks the weight back, turning leans into the corner.
+    const acc = dt > 0 ? (realSpeed - P.speed) / dt : 0;
+    P.speed += (realSpeed - P.speed) * (1 - Math.exp(-12 * dt));
+    P.pitch += (Math.max(-0.12, Math.min(0.12, -acc * 0.025)) * wk - P.pitch) * (1 - Math.exp(-8 * dt));
+    P.roll += (Math.max(-0.2, Math.min(0.2, -turnRate * 0.05 * Math.min(1.5, realSpeed))) - P.roll) * (1 - Math.exp(-8 * dt));
+
     const b = body.current!;
     b.position.y = Math.max(0.07, bodyY);
-    const pitch = -0.85 * sit - 1.05 * p.raise + 0.38 * p.stretchF + 0.05 * p.crouch;
-    b.rotation.x = pitch;
-    b.rotation.z = p.lean * 0.35;
-    b.rotation.y = Math.sin(phase.current) * 0.05 * p.walk;
+    b.rotation.x = pitch - P.pitch;
+    b.rotation.z = p.lean * 0.35 + P.roll;
+    b.rotation.y = Math.sin(phase.current * Math.PI * 2) * 0.05 * wk;
     const breathRate = input.activity === 'sleep' ? 1.3 : 2.4;
     const breathe = 1 + 0.03 * Math.sin(time * breathRate);
     torso.current!.scale.set(1 + p.puff * 0.2, breathe * (1 + p.puff * 0.15) * (1 - 0.15 * p.curl), 1 - 0.28 * p.curl);
 
-    // ---- legs
-    if (pl.moving) phase.current += dt * plan.speed * 7.5;
-    const swing = Math.sin(phase.current) * 0.7 * p.walk;
-    const kneadSwing = Math.sin(time * 5) * 0.4 * p.bob * (input.activity === 'scratch' ? 1 : 0);
-    const legPoses = [
-      // front-left, front-right, hind-left, hind-right
-      { rx: swing - 1.9 * p.raise - 0.9 * p.stretchF + kneadSwing - pitch * 0.9 + 0.3 * lie * 1 },
-      { rx: -swing - 1.9 * p.raise - 0.9 * p.stretchF - kneadSwing - pitch * 0.9 + 0.3 * lie * 1 },
-      { rx: -swing - 1.25 * sit - 1.1 * lie + 0.15 * p.stretchF - pitch * 0.2 },
-      { rx: swing - 1.25 * sit - 1.1 * lie + 0.15 * p.stretchF - pitch * 0.2 },
-    ];
-    for (let i = 0; i < 4; i++) {
-      const lg = legs.current[i];
-      if (!lg) continue;
-      lg.rotation.x = legPoses[i]!.rx;
-      const m = legMesh.current[i];
-      if (m) m.scale.y = Math.max(0.3, (1 - 0.35 * lie - 0.18 * p.crouch) * prop.legs);
-    }
-
     // ---- head and face
     const h = head.current!;
     h.position.set(0, 0.1 * prop.body, 0.4 * prop.body);
-    h.rotation.x = p.headPitch - pitch * 0.75;
-    h.rotation.y = p.headYaw;
+    // Idle life: slow independent head drift while awake and still, and the head leads into turns.
+    const awakeStill = (1 - wk) * (p.eyeOpen > 0.4 ? 1 : 0) * (1 - Math.max(p.lie, p.curl));
+    const seed = idleSeed.current;
+    const drift = awakeStill * (0.22 * Math.sin(time * 0.43 + seed) + 0.12 * Math.sin(time * 1.1 + seed * 2));
+    const lead = Math.max(-0.5, Math.min(0.5, -turnRate * 0.12)) * wk;
+    h.rotation.x = p.headPitch - pitch * 0.75 + 0.05 * awakeStill * Math.sin(time * 0.31 + seed) - (P.pitch * 0.6);
+    h.rotation.y = p.headYaw + drift + lead;
     h.rotation.z = p.headRoll;
     h.scale.setScalar(prop.head);
+    // An occasional ear flick, on one side at a time.
+    const fl = flick.current;
+    if (time > fl.next && fl.t < 0 && p.eyeOpen > 0.3) { fl.t = 0; fl.side = Math.sin(time * 91.7) > 0 ? 1 : -1; fl.next = time + 4 + (frac(Math.sin(time * 7.13) * 4375.85) * 7); }
+    let flickAmt = 0;
+    if (fl.t >= 0) { fl.t += dt; flickAmt = Math.sin(Math.min(1, fl.t / 0.22) * Math.PI) * 0.45; if (fl.t > 0.22) fl.t = -1; }
     for (const [ref, sgn] of [[earL, 1], [earR, -1]] as const) {
       const e = ref.current;
       if (!e) continue;
-      e.rotation.z = sgn * (p.earBack * 0.9 + p.earSwivel * sgn * 0.4);
+      e.rotation.z = sgn * (p.earBack * 0.9 + p.earSwivel * sgn * 0.4) + (fl.side === sgn ? sgn * flickAmt : 0);
       e.rotation.x = -0.1 + p.earBack * 0.7;
       e.scale.setScalar(prop.ears);
     }
@@ -179,10 +246,6 @@ export function Cat() {
     if (lastAct.current !== input.activity + input.activitySince) {
       lastAct.current = input.activity + input.activitySince;
       audio.onActivity(input.activity, v.cat.mood);
-    }
-    if (pl.moving && time - lastStep.current > (pl.trot ? 0.22 : 0.36)) {
-      lastStep.current = time;
-      audio.step();
     }
   });
 
@@ -223,13 +286,18 @@ export function Cat() {
           <mesh ref={eyeL} position={[0.065, 0.03, 0.125]} material={mat('#22301f', { rough: 0.3 })}><sphereGeometry args={[0.03, 10, 8]} /></mesh>
           <mesh ref={eyeR} position={[-0.065, 0.03, 0.125]} material={mat('#22301f', { rough: 0.3 })}><sphereGeometry args={[0.03, 10, 8]} /></mesh>
         </group>
-        {/* legs: [x, z] hips */}
+        {/* legs: [x, z] hips; each has an upper segment, a knee, and a lower segment ending in a paw */}
         {([[0.09, 0.2], [-0.09, 0.2], [0.09, -0.2], [-0.09, -0.2]] as const).map(([x, z], i) => (
           <group key={i} position={[x, -0.05, z]} ref={(el) => { legs.current[i] = el; }}>
-            <mesh ref={(el) => { legMesh.current[i] = el; }} position={[0, -LEG / 2, 0]} material={i < 2 ? bodyMat : darkMat} castShadow>
-              <capsuleGeometry args={[0.04, LEG - 0.06, 4, 8]} />
+            <mesh position={[0, -UP / 2, 0]} material={i < 2 ? bodyMat : darkMat} castShadow>
+              <capsuleGeometry args={[0.046, UP - 0.05, 4, 8]} />
             </mesh>
-            <mesh position={[0, -LEG, 0.02]} material={accentMat}><sphereGeometry args={[0.048, 8, 6]} /></mesh>
+            <group position={[0, -UP, 0]} ref={(el) => { knees.current[i] = el; }}>
+              <mesh position={[0, -LOW / 2, 0]} material={i < 2 ? bodyMat : darkMat} castShadow>
+                <capsuleGeometry args={[0.036, LOW - 0.04, 4, 8]} />
+              </mesh>
+              <mesh position={[0, -LOW, 0.02]} scale={[1, 0.8, 1.25]} material={accentMat}><sphereGeometry args={[PAW_R, 8, 6]} /></mesh>
+            </group>
           </group>
         ))}
         {/* tail */}

@@ -2,7 +2,9 @@
 import { OBJECT_DEFS } from '@/lib/world/catalog';
 import type { GameView } from '@/lib/server/game';
 import type { ThreeEvent } from '@react-three/fiber';
-import { mat } from './materials';
+import { useGame } from '@/lib/client/store';
+import { QUALITY } from '@/lib/client/quality';
+import { blobTexture, mat, roundedBox } from './materials';
 
 export type ViewObject = GameView['objects'][number];
 
@@ -13,7 +15,7 @@ const cream = '#efe3cf';
 
 const Box = ({ s, p = [0, 0, 0], c, r = 0.8 }: { s: [number, number, number]; p?: [number, number, number]; c: string; r?: number }) => (
   <mesh position={p} material={mat(c, { rough: r })} castShadow receiveShadow>
-    <boxGeometry args={s} />
+    <primitive object={roundedBox(s[0], s[1], s[2])} attach="geometry" />
   </mesh>
 );
 const Cyl = ({ r, h, p = [0, 0, 0], c, seg = 16, r2 }: { r: number; h: number; p?: [number, number, number]; c: string; seg?: number; r2?: number }) => (
@@ -30,8 +32,18 @@ export function Prop({ o, onTap, highlight }: { o: ViewObject; onTap?: (id: stri
     onTap?.(o.id);
   };
   const amount = Number(o.state.amount ?? 0);
+  const contact = QUALITY[useGame((s) => s.quality)].contactShadows;
+  const def = OBJECT_DEFS[o.type]!;
+  // Furniture that sits on the floor gets a soft contact shadow: a cheap stand-in for ambient occlusion.
+  const grounded = !['garden_door', 'home_door', 'grass_patch', 'window_perch'].includes(o.type);
   return (
     <group position={[o.x, 0, o.z]} rotation={[0, o.rotation, 0]} onClick={handler}>
+      {contact && grounded && (
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.016, 0]} renderOrder={1}>
+          <planeGeometry args={[def.w * 1.45 + 0.2, def.d * 1.45 + 0.2]} />
+          <meshBasicMaterial map={blobTexture()} transparent opacity={def.blocks ? 0.55 : 0.4} depthWrite={false} toneMapped={false} />
+        </mesh>
+      )}
       {highlight && (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
           <ringGeometry args={[Math.max(OBJECT_DEFS[o.type]!.w, OBJECT_DEFS[o.type]!.d) * 0.62, Math.max(OBJECT_DEFS[o.type]!.w, OBJECT_DEFS[o.type]!.d) * 0.7, 32]} />

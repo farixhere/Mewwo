@@ -2,6 +2,7 @@
 import { create } from 'zustand';
 import type { GameView } from '@/lib/server/game';
 import { PollingTransport, type Transport } from './realtime';
+import { NEXT_HIGHER, NEXT_LOWER, detectQuality, type Quality, type QualityChoice } from './quality';
 
 export type Selection =
   | { kind: 'cat' }
@@ -21,12 +22,17 @@ interface Store {
   selection: Selection;
   viewLocation: string;
   lastCatLocation: string | null;
-  panel: null | 'inventory' | 'memories' | 'map' | 'settings' | 'cat';
+  panel: null | 'inventory' | 'memories' | 'map' | 'settings' | 'cat' | 'build' | 'decor';
   move: MoveDraft | null;
   moveCheck: { ok: boolean; reason?: string } | null;
   toasts: Toast[];
   busy: boolean;
   sound: { master: boolean; effects: boolean; ambient: boolean };
+  /** Active render tier and what the player chose ('auto' lets the device and frame rate decide). */
+  quality: Quality;
+  qualityChoice: QualityChoice;
+  /** Bumped to ask the camera to glide back to its default framing. */
+  cameraNonce: number;
 
   start(): void;
   stop(): void;
@@ -42,6 +48,10 @@ interface Store {
   toast(text: string, tone?: Toast['tone']): void;
   dismissToast(id: number): void;
   setSound(p: Partial<Store['sound']>): void;
+  setQualityChoice(c: QualityChoice): void;
+  degradeQuality(): void;
+  upgradeQuality(): void;
+  recenter(): void;
   now(): number;
 }
 
@@ -70,10 +80,18 @@ export const useGame = create<Store>((set, get) => ({
   toasts: [],
   busy: false,
   sound: { master: true, effects: true, ambient: true },
+  quality: 'medium',
+  qualityChoice: 'auto',
+  cameraNonce: 0,
 
   start() {
     if (transport) return;
-    set({ sound: loadSound() });
+    let choice: QualityChoice = 'auto';
+    try {
+      const raw = localStorage.getItem('mewwo.quality');
+      if (raw === 'high' || raw === 'medium' || raw === 'low' || raw === 'auto') choice = raw;
+    } catch { /* storage may be unavailable */ }
+    set({ sound: loadSound(), qualityChoice: choice, quality: choice === 'auto' ? detectQuality() : choice });
     transport = new PollingTransport();
     transport.start({
       onState: (v) => get().setView(v),
@@ -161,6 +179,21 @@ export const useGame = create<Store>((set, get) => ({
     set({ sound: next });
     try { localStorage.setItem('mewwo.sound', JSON.stringify(next)); } catch { /* ignore */ }
   },
+
+  setQualityChoice(choice) {
+    set({ qualityChoice: choice, quality: choice === 'auto' ? detectQuality() : choice });
+    try { localStorage.setItem('mewwo.quality', choice); } catch { /* ignore */ }
+  },
+  // Frame-rate driven changes only apply while the player has left quality on auto.
+  degradeQuality: () => { if (get().qualityChoice === 'auto') set({ quality: NEXT_LOWER[get().quality] }); },
+  // Never climbs past what the device was judged capable of at start-up.
+  upgradeQuality: () => {
+    if (get().qualityChoice !== 'auto') return;
+    const next = NEXT_HIGHER[get().quality];
+    const rank = { low: 0, medium: 1, high: 2 } as const;
+    if (rank[next] <= rank[detectQuality()]) set({ quality: next });
+  },
+  recenter: () => set((s) => ({ cameraNonce: s.cameraNonce + 1 })),
 
   now: () => Date.now() + get().clockOffset,
 }));

@@ -32,6 +32,8 @@ export function Sheets() {
   if (sel?.kind === 'cat') return <CatSheet />;
   if (sel?.kind === 'object') return <ObjectSheet id={sel.id} />;
   if (panel === 'inventory') return <InventorySheet />;
+  if (panel === 'build') return <ArrangeSheet kind="build" />;
+  if (panel === 'decor') return <ArrangeSheet kind="decor" />;
   if (panel === 'memories') return <MemoriesSheet />;
   if (panel === 'map') return <MapSheet />;
   if (panel === 'settings') return <SettingsSheet />;
@@ -153,24 +155,43 @@ function MoveBar() {
   );
 }
 
-function InventorySheet() {
+const DECOR_TYPES = new Set(['cushion', 'plant', 'toy_mouse', 'toy_ball', 'cardboard_box', 'coffee_table']);
+
+/** Build = the practical furniture; Decor = the cosy extras. Both just pick something to move. */
+function ArrangeSheet({ kind }: { kind: 'build' | 'decor' }) {
   const v = useGame((s) => s.view)!;
   const openPanel = useGame((s) => s.openPanel);
   const beginMove = useGame((s) => s.beginMove);
   const loc = useGame((s) => s.viewLocation);
-  const movable = v.objects.filter((o) => o.location === loc && OBJECT_DEFS[o.type]?.movable);
+  const list = v.objects.filter((o) => o.location === loc && OBJECT_DEFS[o.type]?.movable && DECOR_TYPES.has(o.type) === (kind === 'decor'));
+  const title = kind === 'build' ? 'Build' : 'Decor';
   return (
-    <Sheet title="Bag" sub="Shared by both of you. More turns up every few hours, so nobody is ever stuck." onClose={() => openPanel(null)}>
+    <Sheet title={title} sub={`Rearrange the ${LOCATIONS[loc]?.label.toLowerCase()}. Pick something, then tap where it should go. New pieces will arrive in a later update.`} onClose={() => openPanel(null)}>
+      <div className="items">
+        {list.map((o) => (
+          <button className="item" key={o.id} onClick={() => { openPanel(null); beginMove(o.id); }}>
+            <b>{OBJECT_DEFS[o.type]!.label}</b>
+            <small>{OBJECT_DEFS[o.type]!.blurb}</small>
+          </button>
+        ))}
+        {list.length === 0 && <p className="muted">Nothing to rearrange here yet.</p>}
+      </div>
+    </Sheet>
+  );
+}
+
+function InventorySheet() {
+  const v = useGame((s) => s.view)!;
+  const openPanel = useGame((s) => s.openPanel);
+  return (
+    <Sheet title="Inventory" sub="Shared by both of you. More turns up every few hours, so nobody is ever stuck." onClose={() => openPanel(null)}>
       <div className="tags">
         <span className="tag">🍽️ Kibble × {v.inventory.kibble ?? 0}</span>
         <span className="tag">🐟 Treats × {v.inventory.treat ?? 0}</span>
       </div>
-      <h3 style={{ marginTop: 16, fontSize: 16 }}>Rearrange {LOCATIONS[loc]?.label.toLowerCase()}</h3>
       <div className="row">
-        {movable.map((o) => (
-          <button className="btn" key={o.id} onClick={() => { openPanel(null); beginMove(o.id); }}>{OBJECT_DEFS[o.type]!.label}</button>
-        ))}
-        {movable.length === 0 && <span className="muted">Nothing movable here.</span>}
+        <button className="btn" onClick={() => openPanel('build')}>🔨 Rearrange furniture</button>
+        <button className="btn" onClick={() => openPanel('decor')}>🪴 Rearrange decor</button>
       </div>
     </Sheet>
   );
@@ -228,6 +249,9 @@ function SettingsSheet() {
   const sound = useGame((s) => s.sound);
   const setSound = useGame((s) => s.setSound);
   const openPanel = useGame((s) => s.openPanel);
+  const qualityChoice = useGame((s) => s.qualityChoice);
+  const quality = useGame((s) => s.quality);
+  const setQualityChoice = useGame((s) => s.setQualityChoice);
   const [invite, setInvite] = useState<{ code: string; link: string } | null>(null);
   const [err, setErr] = useState('');
   const toast = useGame((s) => s.toast);
@@ -248,10 +272,17 @@ function SettingsSheet() {
   };
   const partner = v.household.members.find((m) => m.id !== v.me.id);
   return (
-    <Sheet title="More" sub={`${v.household.name} · ${v.household.timeZone}`} onClose={() => openPanel(null)}>
+    <Sheet title="Settings" sub={`${v.household.name} · ${v.household.timeZone}`} onClose={() => openPanel(null)}>
       <label className="sw">Sound<input type="checkbox" checked={sound.master} onChange={(e) => { audio.unlock(); setSound({ master: e.target.checked }); }} /></label>
       <label className="sw">Cat sounds & effects<input type="checkbox" checked={sound.effects} onChange={(e) => setSound({ effects: e.target.checked })} /></label>
       <label className="sw">Ambient (room tone, birds)<input type="checkbox" checked={sound.ambient} onChange={(e) => setSound({ ambient: e.target.checked })} /></label>
+      <h3 style={{ marginTop: 16, fontSize: 16 }}>Graphics</h3>
+      <div className="seg" role="radiogroup" aria-label="Graphics quality">
+        {(['auto', 'high', 'medium', 'low'] as const).map((q) => (
+          <button key={q} role="radio" aria-checked={qualityChoice === q} className={qualityChoice === q ? 'on' : ''} onClick={() => setQualityChoice(q)}>{q[0]!.toUpperCase() + q.slice(1)}</button>
+        ))}
+      </div>
+      <p className="muted" style={{ marginTop: 6 }}>Now using {quality}. Auto steps down by itself if your phone struggles.</p>
       <h3 style={{ marginTop: 16, fontSize: 16 }}>Household</h3>
       <p className="muted">{v.household.members.map((m) => m.name).join(' & ')}{partner ? '' : ' · waiting for your partner'}</p>
       {v.household.canInvite && !invite && <div className="row"><button className="btn primary" onClick={makeInvite}>Invite your partner</button></div>}
