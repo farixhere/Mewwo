@@ -55,7 +55,6 @@ function CatSheet() {
   const v = useGame((s) => s.view)!;
   const act = useGame((s) => s.act);
   const select = useGame((s) => s.select);
-  const busy = useGame((s) => s.busy);
   const c = v.cat;
   const toys = v.objects.filter((o) => o.location === c.location && OBJECT_DEFS[o.type]?.tags.includes('toy'));
   const favToy = toys.slice().sort((a, b) => (c.favourites[`toy:${b.id}`] ?? 0) - (c.favourites[`toy:${a.id}`] ?? 0))[0];
@@ -70,11 +69,11 @@ function CatSheet() {
       {c.hints.length > 0 && <p className="muted" style={{ marginTop: 10 }}>{c.hints.map((h) => h.text).join(' · ')}</p>}
       {me && <p className="muted" style={{ marginTop: 6 }}>{bondText(me.familiarity)}{me.favourite && likes[me.favourite] ? ` · enjoys ${likes[me.favourite]} with you` : ''}.</p>}
       <div className="row">
-        <button className="btn primary" disabled={busy} onClick={() => { audio.unlock(); void act({ type: 'pet' }); select(null); }}>🤚 Pet</button>
-        <button className="btn" disabled={busy || (v.inventory.treat ?? 0) < 1} onClick={() => { audio.unlock(); void act({ type: 'treat' }, (x) => ({ ...x, inventory: { ...x.inventory, treat: Math.max(0, (x.inventory.treat ?? 0) - 1) } })); select(null); }}>
+        <button className="btn primary"  onClick={() => { audio.unlock(); void act({ type: 'pet' }); select(null); }}>🤚 Pet</button>
+        <button className="btn" disabled={(v.inventory.treat ?? 0) < 1} onClick={() => { audio.unlock(); void act({ type: 'treat' }, (x) => ({ ...x, inventory: { ...x.inventory, treat: Math.max(0, (x.inventory.treat ?? 0) - 1) } })); select(null); }}>
           🐟 Treat ({v.inventory.treat ?? 0})
         </button>
-        <button className="btn" disabled={busy || !favToy} onClick={() => { audio.unlock(); if (favToy) void act({ type: 'play', toyId: favToy.id }); select(null); }}>🧶 Play</button>
+        <button className="btn" disabled={!favToy} onClick={() => { audio.unlock(); if (favToy) void act({ type: 'play', toyId: favToy.id }); select(null); }}>🧶 Play</button>
       </div>
       <p className="muted" style={{ marginTop: 12 }}>Tip: tap the floor to call her over. She&apos;ll decide whether she fancies it.</p>
     </Sheet>
@@ -87,7 +86,6 @@ function ObjectSheet({ id }: { id: string }) {
   const select = useGame((s) => s.select);
   const beginMove = useGame((s) => s.beginMove);
   const setViewLocation = useGame((s) => s.setViewLocation);
-  const busy = useGame((s) => s.busy);
   const o = v.objects.find((x) => x.id === id);
   if (!o) return null;
   const def = OBJECT_DEFS[o.type]!;
@@ -104,16 +102,16 @@ function ObjectSheet({ id }: { id: string }) {
       </div>
       <div className="row">
         {o.type === 'food_bowl' && (
-          <button className="btn primary" disabled={busy || amount >= 0.9 || (v.inventory.kibble ?? 0) < 1}
+          <button className="btn primary" disabled={amount >= 0.9 || (v.inventory.kibble ?? 0) < 1}
             onClick={() => { audio.unlock(); void act({ type: 'feed', bowlId: o.id }, (x) => ({ ...setBowl(Math.min(1, amount + 0.6))(x), inventory: { ...x.inventory, kibble: Math.max(0, (x.inventory.kibble ?? 0) - 1) } })); select(null); }}>
             🍽️ Add food ({v.inventory.kibble ?? 0} left)
           </button>
         )}
         {o.type === 'water_bowl' && (
-          <button className="btn primary" disabled={busy || amount >= 0.9} onClick={() => { audio.unlock(); void act({ type: 'water', bowlId: o.id }, setBowl(1)); select(null); }}>💧 Fresh water</button>
+          <button className="btn primary" disabled={amount >= 0.9} onClick={() => { audio.unlock(); void act({ type: 'water', bowlId: o.id }, setBowl(1)); select(null); }}>💧 Fresh water</button>
         )}
         {def.tags.includes('toy') && (
-          <button className="btn primary" disabled={busy} onClick={() => { audio.unlock(); void act({ type: 'play', toyId: o.id }); select(null); }}>🧶 Play with it</button>
+          <button className="btn primary"  onClick={() => { audio.unlock(); void act({ type: 'play', toyId: o.id }); select(null); }}>🧶 Play with it</button>
         )}
         {def.leadsTo && v.locations.includes(def.leadsTo) && (
           <button className="btn primary" onClick={() => { setViewLocation(def.leadsTo!); select(null); }}>🚪 Look {def.leadsTo === 'garden' ? 'outside' : 'inside'}</button>
@@ -132,7 +130,6 @@ function MoveBar() {
   const act = useGame((s) => s.act);
   const update = useGame((s) => s.updateMove);
   const cancel = useGame((s) => s.cancelMove);
-  const busy = useGame((s) => s.busy);
   const o = v.objects.find((x) => x.id === move.id);
   if (!o) return null;
   const def = OBJECT_DEFS[o.type]!;
@@ -143,7 +140,7 @@ function MoveBar() {
         {check ? (check.ok ? 'Tap where it should go.' : check.reason) : 'Tap where it should go.'}
       </div>
       <div className="row">
-        <button className="btn primary" disabled={busy || !check?.ok} onClick={async () => {
+        <button className="btn primary" disabled={!check?.ok} onClick={async () => {
           const ok = await act({ type: 'move', objectId: o.id, x: move.x, z: move.z, rotation: move.rotation, expectedVersion: o.version },
             (x) => ({ ...x, objects: x.objects.map((b) => (b.id === o.id ? { ...b, x: move.x, z: move.z, rotation: move.rotation } : b)) }));
           if (ok) cancel();

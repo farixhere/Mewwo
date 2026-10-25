@@ -57,7 +57,6 @@ export function Hud() {
   const openPanel = useGame((s) => s.openPanel);
   const select = useGame((s) => s.select);
   const act = useGame((s) => s.act);
-  const busy = useGame((s) => s.busy);
   const toast = useGame((s) => s.toast);
   const recenter = useGame((s) => s.recenter);
   const setViewLocation = useGame((s) => s.setViewLocation);
@@ -88,10 +87,13 @@ export function Hud() {
     const now = Date.now();
     if (now - lastCall.current < 2500) return;
     lastCall.current = now;
+    ack();
     const b = LOCATIONS[c.location]!.bounds;
     void act({ type: 'call', x: (b.minX + b.maxX) / 2, z: b.maxZ - 1 });
   };
-  const pet = () => { unlock(); void act({ type: 'pet' }); };
+  // Instant acknowledgement: she perks up the moment you tap, before the server has answered.
+  const ack = () => useGame.getState().setVoiceFx({ id: Date.now(), body: 'perk', gaze: 'player', x: 0, z: 0, startedAt: useGame.getState().now(), dur: 1.2, intensity: 0.4 });
+  const pet = () => { unlock(); ack(); void act({ type: 'pet' }); };
   const play = () => {
     unlock();
     if (!favToy) { toast(`There's no toy in the ${c.location === 'garden' ? 'garden' : 'house'} to play with.`, 'warn'); return; }
@@ -179,11 +181,11 @@ export function Hud() {
           <div className="bottom">
             <div className="bottom-main">
               <div className="actions" role="group" aria-label="Care actions">
-                <button className="act call" disabled={busy} onClick={call}><span aria-hidden>📣</span>Call</button>
-                <button className="act pet" disabled={busy} onClick={pet}><span aria-hidden>🤚</span>Pet</button>
-                <button className="act play" disabled={busy} onClick={play}><span aria-hidden>🧶</span>Play</button>
-                <button className="act feed" disabled={busy} onClick={feed}><span aria-hidden>🍽️</span>Feed</button>
-                <button className="act water" disabled={busy} onClick={water}><span aria-hidden>💧</span>Water</button>
+                <button className="act call" onClick={call}><span aria-hidden>📣</span>Call</button>
+                <button className="act pet" onClick={pet}><span aria-hidden>🤚</span>Pet</button>
+                <button className="act play" onClick={play}><span aria-hidden>🧶</span>Play</button>
+                <button className="act feed" onClick={feed}><span aria-hidden>🍽️</span>Feed</button>
+                <button className="act water" onClick={water}><span aria-hidden>💧</span>Water</button>
               </div>
               <nav className="dock" aria-label="Game menu">
                 {dock.map((d) => (

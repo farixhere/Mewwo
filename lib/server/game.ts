@@ -190,16 +190,24 @@ interface Ctx {
  * household. Two requests can therefore never apply the same elapsed interval, or the same bowl portion, twice.
  */
 async function withHousehold<T>(userId: string, fn: (c: Ctx) => Promise<T>, opts: { write: boolean }): Promise<T> {
-  const hid = await membershipOf(userId);
-  if (!hid) throw new GameError(404, 'No household yet.');
   return getDb().transaction(async (tx) => {
+    // One query finds the household and who is asking (it used to be two queries, one outside the transaction).
+    const [me] = await tx.select({ hid: s.householdMembers.householdId, n: s.users.displayName })
+      .from(s.householdMembers).innerJoin(s.users, eq(s.users.id, s.householdMembers.userId))
+      .where(eq(s.householdMembers.userId, userId)).limit(1);
+    if (!me) throw new GameError(404, 'No household yet.');
+    const hid = me.hid;
     const [h] = await tx.select().from(s.households).where(eq(s.households.id, hid)).for('update');
     if (!h) throw new GameError(404, 'Household not found.');
     const now = Date.now();
-    const [user] = await tx.select({ n: s.users.displayName }).from(s.users).where(eq(s.users.id, userId));
-    const catRow = (await tx.select().from(s.cats).where(eq(s.cats.householdId, hid)).limit(1))[0]!;
-    const st = (await tx.select().from(s.catState).where(eq(s.catState.catId, catRow.id)).limit(1))[0]!;
-    const pers = (await tx.select().from(s.catPersonality).where(eq(s.catPersonality.catId, catRow.id)).limit(1))[0]!;
+    const user = { n: me.n };
+    // The cat, its state and its personality in a single round trip.
+    const [joined] = await tx.select({ cat: s.cats, st: s.catState, pers: s.catPersonality }).from(s.cats)
+      .innerJoin(s.catState, eq(s.catState.catId, s.cats.id))
+      .innerJoin(s.catPersonality, eq(s.catPersonality.catId, s.cats.id))
+      .where(eq(s.cats.householdId, hid)).limit(1);
+    if (!joined) throw new GameError(404, 'No cat found.');
+    const catRow = joined.cat, st = joined.st, pers = joined.pers;
     const objRows = await tx.select().from(s.placedObjects).where(eq(s.placedObjects.householdId, hid));
     const invRows = await tx.select().from(s.inventoryItems).where(eq(s.inventoryItems.householdId, hid));
     const rel = (await tx.select().from(s.catRelationships).where(and(eq(s.catRelationships.catId, catRow.id), eq(s.catRelationships.userId, userId))).limit(1))[0]
@@ -308,6 +316,29 @@ async function regenInventory(c: Ctx, rows: (typeof s.inventoryItems.$inferSelec
 }
 
 // ---------- reading state ----------
+
+/**
+ * Cheap poll: has anything changed since the revision the client already has? One small query, no row lock,
+ * no simulation. Most polls take this path, so taps never queue behind a heavy refresh.
+ * Falls through to a full read when the cat's activity is about to end, since her state is due to move on.
+ */
+export async function stateUnchanged(userId: string, clientRev: number): Promise<boolean> {
+  const db = getDb();
+  const [r] = await db.select({ rev: s.households.rev, until: s.catState.activityUntil, hid: s.householdMembers.householdId })
+    .from(s.householdMembers)
+    .innerJoin(s.households, eq(s.households.id, s.householdMembers.householdId))
+    .innerJoin(s.cats, eq(s.cats.householdId, s.households.id))
+    .innerJoin(s.catState, eq(s.catState.catId, s.cats.id))
+    .where(eq(s.householdMembers.userId, userId)).limit(1);
+  if (!r) return false;
+  const now = Date.now();
+  if (Number(r.rev) !== clientRev || now >= r.until.getTime() - 1500) return false;
+  // Still count as present (throttled, so polling does not become a write storm).
+  await db.update(s.householdMembers).set({ lastSeenAt: new Date(now) })
+    .where(and(eq(s.householdMembers.householdId, r.hid), eq(s.householdMembers.userId, userId),
+      sql`(${s.householdMembers.lastSeenAt} is null or ${s.householdMembers.lastSeenAt} < now() - interval '30 seconds')`));
+  return true;
+}
 
 export async function readState(userId: string) {
   return withHousehold(userId, (c) => buildView(c), { write: false });
