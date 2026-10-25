@@ -127,6 +127,12 @@ export const useGame = create<Store>((set, get) => ({
         patch.toasts = [...prev.toasts, { id: toastId++, text: catLoc === 'garden' ? `${v.cat.name} slipped out to the garden.` : `${v.cat.name} came back inside.` }];
       }
     }
+    // A new milestone appeared (not on first load, and only if it is genuinely fresh): a quiet, optional note.
+    if (prev.view) {
+      const known = new Set(prev.view.memories.map((m) => m.id));
+      const fresh = v.memories.find((m) => !known.has(m.id) && v.now - m.at < 5 * 60_000);
+      if (fresh) patch.toasts = [...(patch.toasts ?? prev.toasts), { id: toastId++, text: `📖 ${fresh.title}` }];
+    }
     // A partner moved the thing I'm moving: drop my draft rather than fight over it.
     if (prev.move && prev.view) {
       const mine = prev.view.objects.find((o) => o.id === prev.move!.id);

@@ -67,6 +67,7 @@ function CatSheet() {
         <span className="tag">feeling {c.mood}</span>
       </div>
       {c.hints.length > 0 && <p className="muted" style={{ marginTop: 10 }}>{c.hints.map((h) => h.text).join(' · ')}</p>}
+      {(() => { const f = favouriteLines(v); return f.length ? <p className="muted" style={{ marginTop: 6 }}>{f.join(' · ')}.</p> : null; })()}
       {me && <p className="muted" style={{ marginTop: 6 }}>{bondText(me.familiarity)}{me.favourite && likes[me.favourite] ? ` · enjoys ${likes[me.favourite]} with you` : ''}.</p>}
       <div className="row">
         <button className="btn primary"  onClick={() => { audio.unlock(); void act({ type: 'pet' }); select(null); }}>🤚 Pet</button>
@@ -78,6 +79,23 @@ function CatSheet() {
       <p className="muted" style={{ marginTop: 12 }}>Tip: tap the floor to call her over. She&apos;ll decide whether she fancies it.</p>
     </Sheet>
   );
+}
+
+/** What she has come to love, from what she actually does. Nothing is shown until it is real. */
+function favouriteLines(v: V): string[] {
+  const fav = v.cat.favourites;
+  const best = (pred: (o: V['objects'][number]) => boolean, key: (o: V['objects'][number]) => string) =>
+    v.objects.filter(pred).map((o) => ({ o, f: fav[key(o)] ?? 0 })).filter((x) => x.f >= 0.55).sort((a, b) => b.f - a.f)[0]?.o;
+  const out: string[] = [];
+  const toy = best((o) => !!OBJECT_DEFS[o.type]?.tags.includes('toy'), (o) => `toy:${o.id}`);
+  if (toy) out.push(`loves the ${OBJECT_DEFS[toy.type]!.label.toLowerCase()}`);
+  const bed = best((o) => !!OBJECT_DEFS[o.type]?.tags.includes('rest') && !OBJECT_DEFS[o.type]?.tags.includes('bird'), (o) => `spot:${o.id}`);
+  if (bed) out.push(`naps in the ${OBJECT_DEFS[bed.type]!.label.toLowerCase()}`);
+  const win = best((o) => !!OBJECT_DEFS[o.type]?.tags.includes('bird'), (o) => `spot:${o.id}`);
+  if (win) out.push('watches birds from the window');
+  const parts = ['morning', 'afternoon', 'evening', 'night'].map((d) => ({ d, f: fav[`habit:play:${d}`] ?? 0 })).filter((x) => x.f >= 0.55).sort((a, b) => b.f - a.f)[0];
+  if (parts) out.push(`plays most in the ${parts.d}`);
+  return out;
 }
 
 function ObjectSheet({ id }: { id: string }) {
@@ -204,7 +222,7 @@ function MemoriesSheet() {
           <article className="card" key={m.id} style={{ ['--r' as string]: `${((i * 37) % 7 - 3) * 0.5}deg` }}>
             <h3>{m.title}</h3>
             {m.body && <p>{m.body}</p>}
-            <div className="date">{new Date(m.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}{m.by ? ` · ${m.by}` : ''}</div>
+            <div className="date">{new Date(m.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} · {new Date(m.at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}{m.by ? ` · ${m.by}` : ''}</div>
           </article>
         ))}
         {v.memories.length === 0 && <p className="muted">Nothing yet. Give it a day.</p>}

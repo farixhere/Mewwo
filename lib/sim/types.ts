@@ -67,7 +67,8 @@ export interface CatSim {
 
 export type SimEventKind =
   | 'first_meal' | 'first_play' | 'favourite_toy' | 'new_sleep_spot'
-  | 'growth_stage' | 'first_drink' | 'garden_unlocked';
+  | 'growth_stage' | 'first_drink' | 'garden_unlocked'
+  | 'first_greeting' | 'first_rub' | 'first_invite' | 'close_bond' | 'favourite_window' | 'favourite_scratcher' | 'play_habit' | 'first_garden_visit';
 
 export interface SimEvent {
   kind: SimEventKind;
@@ -76,6 +77,8 @@ export interface SimEvent {
   title: string;
   body?: string;
   objectId?: string;
+  /** The owner this milestone is about, when it is about one of them. */
+  userId?: string;
   at: number;
 }
 

@@ -83,6 +83,8 @@ export interface EventInput {
   familiarity?: number;
   /** Consecutive pets, including this one. */
   streak?: number;
+  /** Who she is heading toward and how she knows them (activity reactions only). */
+  social?: { style: 'playmate' | 'cuddler' | 'caretaker' | 'new'; greeting: boolean; invite: boolean };
 }
 
 const speaks = (r: () => number, p: number) => r() < clamp01(p);
@@ -174,6 +176,11 @@ function activityReaction(i: EventInput, r: () => number, t: VoiceTraits): React
   const thirsty = n.hydration < 0.3;
   switch (i.activity) {
     case 'seek_attention': {
+      // Inviting play: bright, bouncy sounds, looking at the person. Nothing about food.
+      if (i.social?.invite) {
+        if (speaks(r, 0.4 + 0.5 * t.vocal)) return mk({ sound: r() < 0.5 ? 'chirp' : 'trill', caption: r() < 0.5 ? 6 : 0, gaze: 'player', body: 'perk', intensity: 0.6, priority: 3 });
+        return mk({ gaze: 'player', body: 'perk', priority: 2 });
+      }
       if ((hungry || thirsty) && speaks(r, 0.55 + 0.4 * t.vocal)) {
         return mk({ sound: 'meow_plea', caption: r() < 0.7 ? 4 : 0, gaze: hungry ? 'food' : 'water', body: 'perk', intensity: 0.8, priority: 4 });
       }
@@ -181,6 +188,14 @@ function activityReaction(i: EventInput, r: () => number, t: VoiceTraits): React
       return mk({ gaze: 'player', priority: 2 });
     }
     case 'approach_person':
+      // Greeting someone back after a while: warmer than a casual stroll over, and it differs by who it is.
+      if (i.social?.greeting) {
+        if (speaks(r, 0.45 + 0.45 * t.vocal)) {
+          const quietFriend = i.social.style === 'cuddler';
+          return mk({ sound: quietFriend ? 'purr' : i.social.style === 'playmate' ? 'chirp' : 'trill', caption: r() < 0.6 ? (quietFriend ? 3 : 2) : 0, gaze: 'player', body: 'greet', intensity: 0.6, priority: 3 });
+        }
+        return mk({ gaze: 'player', body: 'greet', priority: 3 });
+      }
       if (speaks(r, 0.2 + 0.5 * i.personality.sociability * t.vocal)) return mk({ sound: 'trill', caption: r() < 0.6 ? 2 : 0, gaze: 'player', body: 'greet', intensity: 0.5, priority: 3 });
       return mk({ gaze: 'player', priority: 2 });
     case 'play':
