@@ -293,7 +293,7 @@ function accrueTogether(c: Ctx, prevSeen: number | null) {
   const last = counts['~tog_at'];
   if (last !== undefined && c.now - last < 45_000) return;
   let fam = c.relationship.familiarity;
-  const next = { ...counts, '~tog_at': c.now };
+  const next: Record<string, number> = { ...counts, '~tog_at': c.now };
   if (last !== undefined && c.now - last < 3 * MINUTE && prevSeen !== null) {
     const mins = (c.now - last) / MINUTE;
     next['~tog'] = (counts['~tog'] ?? 0) + mins;
