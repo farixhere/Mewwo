@@ -71,6 +71,7 @@ export function CatVoice() {
         const age = now - c.activitySince;
         const base = {
           catId: c.id, personality: c.personality as unknown as Personality, needs: toNeeds(c.needs), activity: c.activity as Activity, familiarity: v.relationships.find((r) => r.userId === v.me.id)?.familiarity ?? 0.3,
+          social: c.social?.toward ? { style: c.social.style as 'playmate' | 'cuddler' | 'caretaker' | 'new', greeting: c.social.greeting, invite: c.social.invite } : undefined,
         };
         if (age < FRESH_MS && !(first && age > 3000)) {
           // The server already voiced a call that brought her over; do not greet twice.

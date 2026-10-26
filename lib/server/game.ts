@@ -1,14 +1,15 @@
-import { and, desc, eq, inArray, max, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema as s, type Tx } from './db';
 import { stateColumns, toCatSim, toWorldObject } from './mappers';
 import { hashInvite, newInviteCode } from './auth';
+import { AWAY_MS, FLAG, bondGain, describeTraits, greetPull, ownerKey, ownerProfile, traitsOf, type OwnerBond } from '../sim/bond';
 import { advance, noteNewObject, reactToPerson } from '../sim/engine';
 import { ACTIVITY_DEFS } from '../sim/activities';
 import { careHints, activityLabel, moodWord } from '../sim/describe';
 import { ageDays, proportionsFor, stageForAge, stageLabel } from '../sim/growth';
 import { defaultNeeds } from '../sim/needs';
-import { describePersonality, rollPersonality } from '../sim/personality';
+import { rollPersonality } from '../sim/personality';
 import { decisionRng, mulberry32, hashString } from '../sim/rng';
 import { reinforce, familiarize } from '../sim/learning';
 import { daylight, localHour } from '../sim/time';
@@ -179,6 +180,11 @@ interface Ctx {
   versions: Map<string, number>;
   inventory: Map<string, { id: string; qty: number }>;
   relationship: typeof s.catRelationships.$inferSelect;
+  /** Everyone in the household, and the cat's relationship row with each. */
+  members: { id: string; name: string; seen: Date | null }[];
+  rels: (typeof s.catRelationships.$inferSelect)[];
+  /** The acting owner's relationship row needs saving (time together). */
+  relDirty: boolean;
   now: number;
   hour: number;
   changed: boolean;
@@ -210,17 +216,21 @@ async function withHousehold<T>(userId: string, fn: (c: Ctx) => Promise<T>, opts
     const catRow = joined.cat, st = joined.st, pers = joined.pers;
     const objRows = await tx.select().from(s.placedObjects).where(eq(s.placedObjects.householdId, hid));
     const invRows = await tx.select().from(s.inventoryItems).where(eq(s.inventoryItems.householdId, hid));
-    const rel = (await tx.select().from(s.catRelationships).where(and(eq(s.catRelationships.catId, catRow.id), eq(s.catRelationships.userId, userId))).limit(1))[0]
+    const members = (await tx.select({ id: s.users.id, name: s.users.displayName, seen: s.householdMembers.lastSeenAt })
+      .from(s.householdMembers).innerJoin(s.users, eq(s.users.id, s.householdMembers.userId))
+      .where(eq(s.householdMembers.householdId, hid))).map((m) => ({ id: m.id, name: m.name, seen: m.seen ? new Date(m.seen as unknown as string) : null }));
+    const rels = await tx.select().from(s.catRelationships).where(eq(s.catRelationships.catId, catRow.id));
+    const rel = rels.find((r) => r.userId === userId)
       ?? (await tx.insert(s.catRelationships).values({ catId: catRow.id, userId }).returning())[0]!;
-    const seen = (await tx.select({ t: max(s.householdMembers.lastSeenAt) }).from(s.householdMembers).where(eq(s.householdMembers.householdId, hid)))[0]?.t;
-    const anyoneHere = !!seen && now - new Date(seen as unknown as string).getTime() < PRESENCE_MS;
+    if (!rels.includes(rel)) rels.push(rel);
+    const prevSeen = members.find((m) => m.id === userId)?.seen?.getTime() ?? null;
 
     const ctx: Ctx = {
       tx, userId, userName: user?.n ?? 'Someone', householdId: hid, householdName: h.name, timeZone: h.timeZone, rev: Number(h.rev),
       catRow, sim: toCatSim(catRow, st, pers), objects: objRows.map(toWorldObject),
       versions: new Map(objRows.map((o) => [o.id, o.version])),
       inventory: new Map(invRows.map((i) => [i.itemType, { id: i.id, qty: i.quantity }])),
-      relationship: rel, now, hour: localHour(now, h.timeZone), changed: false, events: [],
+      relationship: rel, members, rels, relDirty: false, now, hour: localHour(now, h.timeZone), changed: false, events: [],
     };
     const originalObjects = new Map(ctx.objects.map((o) => [o.id, JSON.stringify([o.x, o.z, o.rotation, o.state])]));
 
@@ -228,16 +238,26 @@ async function withHousehold<T>(userId: string, fn: (c: Ctx) => Promise<T>, opts
     await maybeUnlockGarden(ctx);
     // 2. Pantry refills slowly so nobody is ever stuck.
     await regenInventory(ctx, invRows);
-    // 3. Bring the cat up to the present.
+    // 3. Welcome back: an owner returning after a while gets a greeting (noted once; she acts on it when she next chooses).
+    let greeted = false;
+    if (prevSeen && now - prevSeen > AWAY_MS) {
+      ctx.sim = { ...ctx.sim, familiarity: { ...ctx.sim.familiarity, [FLAG.greetFor]: ownerKey(userId), [FLAG.greetAt]: now } };
+      greeted = true;
+    }
+    accrueTogether(ctx, prevSeen);
+    const owners = ownersOf(ctx);
+    const anyoneHere = owners.some((o) => o.here);
+
+    // 4. Bring the cat up to the present.
     const before = ctx.sim.rngCounter;
-    const r = advance(ctx.sim, ctx.objects, now, { timeZone: h.timeZone, anyoneHere });
+    const r = advance(ctx.sim, ctx.objects, now, { timeZone: h.timeZone, anyoneHere, owners });
     ctx.sim = r.cat;
     ctx.objects = r.objects;
     ctx.events.push(...r.events);
     const decisionsMade = r.cat.rngCounter !== before;
     const objectsMoved = ctx.objects.some((o) => originalObjects.get(o.id) !== JSON.stringify([o.x, o.z, o.rotation, o.state]));
     const stale = now - st.lastSimAt.getTime() >= PERSIST_EVERY_MS;
-    const mustPersist = opts.write || decisionsMade || objectsMoved || r.events.length > 0 || stale;
+    const mustPersist = opts.write || decisionsMade || objectsMoved || r.events.length > 0 || stale || greeted || ctx.relDirty;
 
     const result = await fn(ctx);
 
@@ -252,6 +272,36 @@ async function withHousehold<T>(userId: string, fn: (c: Ctx) => Promise<T>, opts
         sql`(${s.householdMembers.lastSeenAt} is null or ${s.householdMembers.lastSeenAt} < now() - interval '30 seconds')`));
     return result;
   });
+}
+
+/** Who is around right now, and how the cat feels about each of them. Both owners are always represented. */
+function ownersOf(c: Ctx): OwnerBond[] {
+  return c.members.map((m) => {
+    const r = c.rels.find((x) => x.userId === m.id);
+    const prof = r ? ownerProfile(r.interactionCounts, r.familiarity, r.recentPositive) : { bond: 0.15, play: 0.5, quiet: 0.5 };
+    const here = m.id === c.userId || (!!m.seen && c.now - m.seen.getTime() < PRESENCE_MS);
+    return { id: m.id, key: ownerKey(m.id), here, bond: prof.bond, play: prof.play, quiet: prof.quiet };
+  });
+}
+
+/**
+ * Time together grows a bond slowly. Counted in coarse steps (so polling never turns into a write storm) and only while
+ * that person is actually around; the other owner's row is never touched.
+ */
+function accrueTogether(c: Ctx, prevSeen: number | null) {
+  const counts = c.relationship.interactionCounts;
+  const last = counts['~tog_at'];
+  if (last !== undefined && c.now - last < 45_000) return;
+  let fam = c.relationship.familiarity;
+  const next: Record<string, number> = { ...counts, '~tog_at': c.now };
+  if (last !== undefined && c.now - last < 3 * MINUTE && prevSeen !== null) {
+    const mins = (c.now - last) / MINUTE;
+    next['~tog'] = (counts['~tog'] ?? 0) + mins;
+    fam = Math.min(1, fam + 0.0015 * mins * (1.1 - fam));
+  }
+  c.relationship = { ...c.relationship, interactionCounts: next, familiarity: fam };
+  c.rels = c.rels.map((r) => (r.userId === c.userId ? c.relationship : r));
+  c.relDirty = true;
 }
 
 async function persist(c: Ctx, original: Map<string, string>, steps: number, prevSimAt: number) {
@@ -271,9 +321,10 @@ async function persist(c: Ctx, original: Map<string, string>, steps: number, pre
   for (const e of c.events) {
     await tx.insert(s.memories).values({
       householdId: c.householdId, kind: e.kind, title: e.title, body: e.body ?? null, objectId: e.objectId && isUuid(e.objectId) ? e.objectId : null,
-      occurredAt: new Date(e.at), dedupeKey: e.dedupeKey,
+      userId: e.userId && isUuid(e.userId) ? e.userId : null, occurredAt: new Date(e.at), dedupeKey: e.dedupeKey,
     }).onConflictDoNothing();
   }
+  if (c.relDirty) await saveRelationship(c);
   if (steps > 0) {
     await tx.insert(s.simCheckpoints).values({ catId: sim.id, fromAt: new Date(prevSimAt), toAt: new Date(c.now), steps });
   }
@@ -324,7 +375,7 @@ async function regenInventory(c: Ctx, rows: (typeof s.inventoryItems.$inferSelec
  */
 export async function stateUnchanged(userId: string, clientRev: number): Promise<boolean> {
   const db = getDb();
-  const [r] = await db.select({ rev: s.households.rev, until: s.catState.activityUntil, hid: s.householdMembers.householdId })
+  const [r] = await db.select({ rev: s.households.rev, until: s.catState.activityUntil, hid: s.householdMembers.householdId, seen: s.householdMembers.lastSeenAt })
     .from(s.householdMembers)
     .innerJoin(s.households, eq(s.households.id, s.householdMembers.householdId))
     .innerJoin(s.cats, eq(s.cats.householdId, s.households.id))
@@ -333,6 +384,8 @@ export async function stateUnchanged(userId: string, clientRev: number): Promise
   if (!r) return false;
   const now = Date.now();
   if (Number(r.rev) !== clientRev || now >= r.until.getTime() - 1500) return false;
+  // Coming back after a while needs the full path, which is where the cat notices and greets them.
+  if (!r.seen || now - new Date(r.seen as unknown as string).getTime() > AWAY_MS) return false;
   // Still count as present (throttled, so polling does not become a write storm).
   await db.update(s.householdMembers).set({ lastSeenAt: new Date(now) })
     .where(and(eq(s.householdMembers.householdId, r.hid), eq(s.householdMembers.userId, userId),
@@ -346,12 +399,10 @@ export async function readState(userId: string) {
 
 async function buildView(c: Ctx) {
   const { tx, sim } = c;
-  const members = await tx.select({ id: s.users.id, name: s.users.displayName, seen: s.householdMembers.lastSeenAt })
-    .from(s.householdMembers).innerJoin(s.users, eq(s.users.id, s.householdMembers.userId))
-    .where(eq(s.householdMembers.householdId, c.householdId));
+  const members = c.members.map((m) => ({ ...m, seen: m.seen as Date | null }));
   const mems = await tx.select().from(s.memories).where(eq(s.memories.householdId, c.householdId)).orderBy(desc(s.memories.occurredAt)).limit(60);
   const locs = await tx.select({ id: s.householdLocations.locationId }).from(s.householdLocations).where(eq(s.householdLocations.householdId, c.householdId));
-  const rels = await tx.select().from(s.catRelationships).where(eq(s.catRelationships.catId, sim.id));
+  const rels = c.rels;
   const age = ageDays(sim.bornAt, c.now);
   const n = sim.needs;
   const q = (v: number) => Math.round(v * 20) / 20;
@@ -368,7 +419,9 @@ async function buildView(c: Ctx) {
     cat: {
       id: sim.id, name: c.catRow.name, coatSeed: c.catRow.coatSeed, bornAt: sim.bornAt, ageDays: age,
       stage: sim.stage, stageLabel: stageLabel(sim.stage), proportions: proportionsFor(age),
-      traits: describePersonality(sim.personality),
+      traits: (() => { const t = traitsOf(sim.personality, sim.id); return describeTraits(t, sim.personality.cautiousness); })(),
+      traits6: (() => { const t = traitsOf(sim.personality, sim.id); return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, Math.round(v * 100) / 100])) as Record<string, number>; })(),
+      social: socialView(c),
       personality: Object.fromEntries(Object.entries(sim.personality).map(([k, v]) => [k, Math.round(v * 100) / 100])) as Record<string, number>,
       reaction: (() => { const rx = decodeReaction(sim.familiarity); return rx ? { ...rx, byMe: rx.by === hashString(c.userId) % 1_000_000 } : null; })(),
       favourites: Object.fromEntries(Object.entries(sim.preferences).filter(([, v]) => v >= 0.45).map(([k, v]) => [k, Math.round(v * 100) / 100])),
@@ -385,8 +438,24 @@ async function buildView(c: Ctx) {
     relationships: rels.map((r) => ({
       userId: r.userId, name: members.find((m) => m.id === r.userId)?.name ?? 'Someone',
       familiarity: Math.round(r.familiarity * 100) / 100,
-      favourite: Object.entries(r.interactionCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
+      favourite: Object.entries(r.interactionCounts).filter(([k]) => !k.startsWith('~')).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
+      style: ownerProfile(r.interactionCounts, r.familiarity, r.recentPositive).style,
     })),
+  };
+}
+
+/** Who she is currently turning toward and why, so every client voices the same greeting or invitation. */
+function socialView(c: Ctx) {
+  const fam = c.sim.familiarity;
+  const toward = c.members.find((m) => ownerKey(m.id) === fam[FLAG.focus]);
+  const rel = toward ? c.rels.find((r) => r.userId === toward.id) : undefined;
+  const style = rel ? ownerProfile(rel.interactionCounts, rel.familiarity, rel.recentPositive).style : 'new';
+  const social = ['approach_person', 'rub', 'seek_attention'].includes(c.sim.activity) && fam[FLAG.initAt] !== undefined && fam[FLAG.initAt]! >= c.sim.activitySince - 1000;
+  return {
+    toward: social && toward ? toward.id : null,
+    style,
+    greeting: social && !!toward && c.sim.activity === 'approach_person' && greetPull(fam, ownerKey(toward.id), c.now) > 0,
+    invite: social && fam[FLAG.inviteAt] === c.sim.activitySince,
   };
 }
 
@@ -425,13 +494,17 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
   const catName = c.catRow.name;
   const rng = decisionRng(sim.id, sim.rngCounter + 104729);
   const bumpRel = (kind: string) => {
+    const counts = c.relationship.interactionCounts;
+    // Diminishing returns, and the same kind of interaction repeated within seconds counts for nothing.
+    const gain = bondGain(c.relationship.familiarity, c.now - (counts[`~t_${kind}`] ?? 0));
     c.relationship = {
       ...c.relationship,
-      familiarity: Math.min(1, c.relationship.familiarity + 0.012),
-      recentPositive: Math.min(1, c.relationship.recentPositive + 0.1),
-      interactionCounts: { ...c.relationship.interactionCounts, [kind]: (c.relationship.interactionCounts[kind] ?? 0) + 1 },
+      familiarity: Math.min(1, c.relationship.familiarity + gain),
+      recentPositive: Math.min(1, c.relationship.recentPositive + (gain > 0 ? 0.1 : 0.01)),
+      interactionCounts: gain > 0 ? { ...counts, [kind]: (counts[kind] ?? 0) + 1, [`~t_${kind}`]: c.now } : counts,
       lastInteractionAt: new Date(c.now),
     };
+    c.rels = c.rels.map((r) => (r.userId === c.userId ? c.relationship : r));
   };
   /** Record how the cat reacts to what was just done, so both owners see and hear the same thing. */
   const speak = (kind: EventKind, o: { distance?: number; streak?: number; x?: number; z?: number } = {}) => {
@@ -443,7 +516,7 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
     encodeReaction(c.sim.familiarity, rx, c.now, c.userId, o.x, o.z);
   };
   const memory = async (kind: string, title: string, body?: string) => {
-    c.events.push({ kind: kind as SimEvent['kind'], dedupeKey: `${kind}:${c.userId}`, title, body, at: c.now });
+    c.events.push({ kind: kind as SimEvent['kind'], dedupeKey: `${kind}:${c.userId}`, title, body, userId: c.userId, at: c.now });
   };
 
   switch (a.type) {
@@ -520,6 +593,7 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
         reinforce(next.preferences, `toy:${t.id}`, 0.05);
         familiarize(next.familiarity, t.id, 0.1);
         speak('play_go');
+        await memory('first_play_with', `${c.userName} and ${catName} play together`, `A first proper game, ${catName} pouncing on the ${OBJECT_DEFS[t.type]!.label.toLowerCase()}.`);
         return `${catName} spots the ${OBJECT_DEFS[t.type]!.label.toLowerCase()} and crouches low...`;
       }
       speak('play_wait');
@@ -541,6 +615,7 @@ async function applyAction(c: Ctx, a: ActionInput): Promise<string> {
       c.sim = { ...sim, activity: 'approach_person', targetId: null, destX: dest.x, destZ: dest.z, activitySince: c.now, activityUntil: c.now + 70_000 };
       speak('call_noticed', { distance, x: p.x, z: p.z });
       bumpRel('call');
+      await memory('first_call', `${catName} comes when ${c.userName} calls`, 'Padded all the way over.');
       return `${catName} pads over to see what you're up to.`;
     }
     case 'move': {
@@ -573,13 +648,19 @@ function reactionText(mood: string, name: string): string {
   }
 }
 
-async function recordInteraction(c: Ctx, a: ActionInput) {
-  const objectId = 'bowlId' in a ? a.bowlId : 'toyId' in a ? a.toyId : 'objectId' in a ? a.objectId : null;
-  await c.tx.insert(s.interactionEvents).values({ householdId: c.householdId, userId: c.userId, kind: a.type, objectId, payload: {} });
+async function saveRelationship(c: Ctx) {
   const r = c.relationship;
   await c.tx.update(s.catRelationships).set({
     familiarity: r.familiarity, recentPositive: r.recentPositive, interactionCounts: r.interactionCounts, lastInteractionAt: r.lastInteractionAt,
   }).where(and(eq(s.catRelationships.catId, r.catId), eq(s.catRelationships.userId, r.userId)));
+  c.relDirty = false;
+}
+
+async function recordInteraction(c: Ctx, a: ActionInput) {
+  const objectId = 'bowlId' in a ? a.bowlId : 'toyId' in a ? a.toyId : 'objectId' in a ? a.objectId : null;
+  await c.tx.insert(s.interactionEvents).values({ householdId: c.householdId, userId: c.userId, kind: a.type, objectId, payload: {} });
+  // Only the acting owner's own row is written, inside the household lock, so the other owner's history is never overwritten.
+  await saveRelationship(c);
 }
 
 // Used by tests and scripts.

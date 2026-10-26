@@ -2,6 +2,7 @@ import { ACTIVITY_DEFS, BOWL_USE } from './activities.ts';
 import { chooseActivity } from './brain.ts';
 import { ageDays, stageForAge, stageLabel } from './growth.ts';
 import { familiarize, reinforce } from './learning.ts';
+import { FLAG, dayPart, greetPull, habitKey, type OwnerBond } from './bond.ts';
 import { applyFloors, applyGains, decay } from './needs.ts';
 import { decisionRng } from './rng.ts';
 import { daylight, localHour } from './time.ts';
@@ -21,7 +22,14 @@ export const MAX_ITERATIONS = 1500;
 export interface AdvanceContext {
   timeZone: string;
   anyoneHere: boolean;
+  /**
+   * Who is around right now and how she feels about each. Presence is only known for the present moment, so it
+   * is applied to the last few minutes of a replay and not to hours she spent alone.
+   */
+  owners?: OwnerBond[];
 }
+
+const PRESENT_WINDOW_MS = 6 * MIN;
 
 export interface AdvanceResult {
   cat: CatSim;
@@ -90,13 +98,22 @@ export function advance(input: CatSim, objectsIn: WorldObject[], now: number, ct
 
     // Time to choose something new?
     if (t >= cat.activityUntil) {
-      finishActivity(cat, objects, t, events, gridFor);
+      const hourNow = localHour(t, ctx.timeZone);
+      finishActivity(cat, objects, t, events, gridFor, ctx.owners, hourNow);
       cat.rngCounter += 1;
       const hour = localHour(t, ctx.timeZone);
+      const present = !ctx.owners || now - t < PRESENT_WINDOW_MS;
+      const owners = ctx.owners ? (present ? ctx.owners : []) : undefined;
       const d = chooseActivity({
-        cat, objects, now: t, hour, anyoneHere: ctx.anyoneHere,
+        cat, objects, now: t, hour, anyoneHere: ctx.owners ? present && ctx.owners.some((o) => o.here) : ctx.anyoneHere, owners,
         rng: decisionRng(cat.id, cat.rngCounter), daylight: daylight(hour),
       });
+      if (d.initiated) {
+        // Reaching out starts a quiet period, and remembers who she turned toward (for the greeting memory).
+        cat.familiarity[FLAG.initAt] = t;
+        if (d.focus) cat.familiarity[FLAG.focus] = d.focus.key;
+        if (d.invite) cat.familiarity[FLAG.inviteAt] = t;
+      }
       cat.prevActivity = cat.activity;
       cat.activity = d.activity;
       cat.targetId = d.targetId;
@@ -148,10 +165,28 @@ export function advance(input: CatSim, objectsIn: WorldObject[], now: number, ct
 }
 
 /** Learning, familiarity and milestones when an activity completes. */
-function finishActivity(cat: CatSim, objects: WorldObject[], at: number, events: SimEvent[], gridFor: (loc: string) => Grid): void {
+function finishActivity(cat: CatSim, objects: WorldObject[], at: number, events: SimEvent[], gridFor: (loc: string) => Grid, owners: OwnerBond[] | undefined, hour: number): void {
   const a: Activity = cat.activity;
+  const who = owners?.find((o) => o.key === cat.familiarity[FLAG.focus]);
+  // Company milestones. Each is keyed to the owner, so it happens once for each of them.
+  if (who && who.here && (a === 'approach_person' || a === 'rub' || a === 'seek_attention')) {
+    const inviting = a === 'seek_attention' && cat.familiarity[FLAG.inviteAt] === cat.activitySince;
+    if (a === 'approach_person' && greetPull(cat.familiarity, who.key, at) > 0) {
+      events.push({ kind: 'first_greeting', dedupeKey: `first_greeting:${who.id}`, title: 'A proper welcome', body: 'Trotted over, tail high, to say hello.', userId: who.id, at });
+    }
+    if (a === 'rub' && who.bond >= 0.3) {
+      events.push({ kind: 'first_rub', dedupeKey: `first_rub:${who.id}`, title: 'A cheek rub', body: 'Pressed her cheek against a leg, tail curled up.', userId: who.id, at });
+    }
+    if (inviting) {
+      events.push({ kind: 'first_invite', dedupeKey: `first_invite:${who.id}`, title: 'Asked to play', body: 'Fetched a toy and looked up expectantly.', userId: who.id, at });
+    }
+    if (who.bond >= 0.55) {
+      events.push({ kind: 'close_bond', dedupeKey: `close_bond:${who.id}`, title: 'Settling in together', body: 'Seems completely at ease with this person.', userId: who.id, at });
+    }
+  }
   const target = objects.find((o) => o.id === cat.targetId);
   if (a === 'explore') {
+    events.push({ kind: 'first_garden_visit', dedupeKey: 'first_garden_visit', title: 'First step outside', body: 'Ventured through the garden door and into the grass.', at });
     cat.location = 'garden';
     const door = objects.find((o) => o.location === 'garden' && o.type === 'home_door');
     cat.x = door ? door.x : 0;
@@ -184,6 +219,9 @@ function finishActivity(cat: CatSim, objects: WorldObject[], at: number, events:
       break;
     case 'play': {
       const v = reinforce(cat.preferences, `toy:${target.id}`, 0.12);
+      // When she likes to play: a habit that builds from real play sessions, per part of the day.
+      const hv = reinforce(cat.preferences, habitKey('play', hour), 0.1);
+      if (hv >= 0.55) events.push({ kind: 'play_habit', dedupeKey: 'play_habit', title: `Lively in the ${dayPart(hour)}`, body: `She tends to want to play in the ${dayPart(hour)}.`, at });
       familiarize(cat.familiarity, target.id, 0.1);
       events.push({ kind: 'first_play', dedupeKey: 'first_play', title: 'First play session', body: `Pounced on the ${OBJECT_DEFS[target.type]?.label.toLowerCase() ?? 'toy'}.`, objectId: target.id, at });
       if (v >= 0.6) events.push({ kind: 'favourite_toy', dedupeKey: 'favourite_toy', title: 'Found a favourite toy', body: `The ${OBJECT_DEFS[target.type]?.label.toLowerCase() ?? 'toy'} is a hit.`, objectId: target.id, at });
@@ -200,11 +238,21 @@ function finishActivity(cat: CatSim, objects: WorldObject[], at: number, events:
       }
       break;
     }
+    case 'watch_bird': {
+      const v = reinforce(cat.preferences, `spot:${target.id}`, 0.1);
+      familiarize(cat.familiarity, target.id, 0.08);
+      if (v >= 0.55) events.push({ kind: 'favourite_window', dedupeKey: 'favourite_window', title: 'A favourite window', body: 'Keeps coming back to watch the birds from here.', objectId: target.id, at });
+      break;
+    }
+    case 'scratch': {
+      const v = reinforce(cat.preferences, `spot:${target.id}`, 0.1);
+      if (v >= 0.55) events.push({ kind: 'favourite_scratcher', dedupeKey: 'favourite_scratcher', title: 'A favourite scratching post', body: `The ${OBJECT_DEFS[target.type]?.label.toLowerCase() ?? 'scratcher'} gets the most attention.`, objectId: target.id, at });
+      break;
+    }
     case 'investigate':
       familiarize(cat.familiarity, target.id, 0.3);
       break;
     case 'sniff':
-    case 'watch_bird':
     case 'hide':
       familiarize(cat.familiarity, target.id, 0.08);
       break;

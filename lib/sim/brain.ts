@@ -2,6 +2,7 @@ import { ACTIVITY_DEFS, BOWL_USE } from './activities.ts';
 import { stageBehaviour } from './growth.ts';
 import { chronotypeShift } from './personality.ts';
 import { clamp01 } from './rng.ts';
+import { FLAG, greetPull, initiativeFactor, pickFocusOwner, traitsOf, type OwnerBond } from './bond.ts';
 import type { Activity, CatSim, WorldObject } from './types.ts';
 import { OBJECT_DEFS, hasTag } from '../world/catalog.ts';
 
@@ -12,6 +13,8 @@ export interface BrainContext {
   now: number;
   hour: number;
   anyoneHere: boolean;
+  /** Who is around and how she feels about each of them. Absent in tests that do not care. */
+  owners?: OwnerBond[];
   rng: () => number;
   daylight: number;
 }
@@ -20,9 +23,15 @@ export interface Decision {
   activity: Activity;
   targetId: string | null;
   durationMs: number;
+  /** She reached out to someone (starts the quiet period before she does so again). */
+  initiated?: boolean;
+  /** The owner she is turning toward. */
+  focus?: OwnerBond | null;
+  /** The reach-out is an invitation to play. */
+  invite?: boolean;
 }
 
-interface Candidate { activity: Activity; targetId: string | null; utility: number }
+interface Candidate { activity: Activity; targetId: string | null; utility: number; social?: boolean; invite?: boolean }
 
 const dist = (c: CatSim, o: WorldObject) => Math.hypot(o.x - c.x, o.z - c.z);
 
@@ -54,18 +63,25 @@ export function chooseActivity(ctx: BrainContext): Decision {
   const prefOf = (key: string) => cat.preferences[key] ?? 0.3;
   const famOf = (o: WorldObject) => cat.familiarity[o.id] ?? 0;
   const cands: Candidate[] = [];
-  const add = (activity: Activity, targetId: string | null, utility: number) => {
-    if (utility > 0.001) cands.push({ activity, targetId, utility });
+  const add = (activity: Activity, targetId: string | null, utility: number, flags?: { social?: boolean; invite?: boolean }) => {
+    if (utility > 0.001) cands.push({ activity, targetId, utility, ...flags });
   };
   const nearest = (list: WorldObject[]) => list.slice().sort((a, b) => dist(cat, a) - dist(cat, b))[0];
   const inGarden = cat.location === 'garden';
+
+  // Who she might turn toward. Everyone present has a real chance; her bond with each only tilts it.
+  const tr = traitsOf(p, cat.id);
+  const owners = ctx.owners;
+  const anyone = owners ? owners.some((o) => o.here) : ctx.anyoneHere;
+  const focus = owners && anyone ? pickFocusOwner(owners, rng) : null;
+  const bond = focus?.bond ?? 0.3;
 
   // --- Food and water: only when the bowl actually has something.
   const food = byTag('food').filter((o) => Number(o.state.amount ?? 0) > 0.04);
   if (food.length) {
     const hungry = (1 - n.satiety) ** 1.4 * 1.7;
     add('eat', nearest(food)!.id, hungry + (n.satiety < 0.45 ? 0.15 : 0));
-  } else if (!inGarden && n.satiety < 0.45 && ctx.anyoneHere) {
+  } else if (!inGarden && n.satiety < 0.45 && anyone) {
     const bowl = nearest(byTag('food'));
     add('seek_attention', bowl?.id ?? null, (1 - n.satiety) * 0.9);
   }
@@ -85,7 +101,9 @@ export function chooseActivity(ctx: BrainContext): Decision {
       const def = OBJECT_DEFS[o.type]!;
       const stressPref = hasTag(o, 'hide') ? 0.25 * n.stress : 0;
       const s = (def.restQuality ?? 0.5) * 0.6 + prefOf(`spot:${o.id}`) * 0.7 + stressPref - dist(cat, o) * 0.04 + (rng() - 0.5) * 0.08
-        + (def.elevated && p.cautiousness < 0.5 ? 0.06 : 0);
+        + (def.elevated && p.cautiousness < 0.5 ? 0.06 : 0)
+        // A cat that is fond of someone sleeps in the room's front half, nearest to them.
+        + (anyone ? Math.max(-1, Math.min(1, o.z / 3)) * 0.1 * tr.affection * bond : 0);
       return { o, s };
     }).sort((a, b) => b.s - a.s);
     const best = scored[0]!.o;
@@ -135,17 +153,32 @@ export function chooseActivity(ctx: BrainContext): Decision {
     const h = hides.slice().sort((a, b) => prefOf(`spot:${b.id}`) - prefOf(`spot:${a.id}`))[0]!;
     add('hide', h.id, n.stress * 1.7 * (0.35 + p.cautiousness));
   }
-  if (n.stress > 0.45 && ctx.anyoneHere) {
+  if (n.stress > 0.45 && anyone) {
     const quiet = hides[0] ?? restSpots[0];
     add('retreat', quiet?.id ?? null, n.stress * 1.1);
   }
 
-  // --- Company.
-  if (ctx.anyoneHere && !inGarden) {
-    const rel = (1 - n.social) * (0.25 + p.sociability) * sb.attention;
-    add('approach_person', null, rel * 0.95);
-    add('seek_attention', null, rel * 0.6);
-    if (cat.prevActivity === 'approach_person') add('rub', null, 1.6);
+  // --- Company. Affection, independence and her history with this person shape it; she does not pester.
+  if (anyone && !inGarden) {
+    const wait = initiativeFactor(cat.familiarity[FLAG.initAt], ctx.now);
+    const greet = greetPull(cat.familiarity, focus?.key ?? null, ctx.now);
+    const closeness = 0.15 + 0.45 * tr.sociability + 0.4 * tr.affection;
+    // After a cuddle or a request she is content for a while.
+    const settled = cat.prevActivity === 'rub' || cat.prevActivity === 'seek_attention' ? 0.3 : 1;
+    const rel = (1 - n.social) * closeness * sb.attention * (0.6 + 0.6 * bond) * (1 - 0.35 * tr.independence) * (0.3 + 0.7 * wait) * settled
+      + greet * 0.9 * (1 - n.stress) * settled;
+    // Hard quiet period: right after reaching out she does not do it again, whatever else is true.
+    if (wait > 0) {
+      add('approach_person', null, rel * 0.95, { social: true });
+      add('seek_attention', null, rel * 0.6, { social: true });
+    }
+    if (cat.prevActivity === 'approach_person') add('rub', null, 1.6 * (0.2 + 0.8 * tr.affection) * (0.5 + 0.5 * bond), { social: true });
+    // Invite play with someone she plays with: go to a favourite toy and make a fuss about it.
+    const playToys = byTag('toy');
+    if (focus && playToys.length && n.energy > 0.4 && n.play < 0.65 && focus.play > 0.5 && wait > 0.3 && n.stress < 0.3 && wait > 0) {
+      const toyPick = playToys.slice().sort((a, b) => prefOf(`toy:${b.id}`) - prefOf(`toy:${a.id}`))[0]!;
+      add('seek_attention', toyPick.id, 1.1 * tr.playfulness * (focus.play - 0.35) * (1 - n.play) * wait * settled, { social: true, invite: true });
+    }
   }
 
   // --- Garden trips: curious, rested, young-but-not-tiny cats, in daylight only.
@@ -183,7 +216,8 @@ export function chooseActivity(ctx: BrainContext): Decision {
   const spread = def.min + rng() * (def.max - def.min);
   const stageScale = cat.stage === 'young_kitten' ? 0.75 : 1;
   const minutes = Math.max(0.4, spread * (chosen.activity === 'sleep' ? 1 : stageScale) * (0.85 + 0.3 * (chosen.activity === 'play' ? p.playfulness : 0.5)));
-  return { activity: chosen.activity, targetId: chosen.targetId, durationMs: Math.round(minutes * 60_000) };
+  const initiated = !!chosen.social;
+  return { activity: chosen.activity, targetId: chosen.targetId, durationMs: Math.round(minutes * 60_000), initiated, focus: initiated ? focus : null, invite: !!chosen.invite };
 }
 
 export { BOWL_USE };
